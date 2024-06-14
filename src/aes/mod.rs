@@ -50,7 +50,6 @@ impl Encrypt {
                 let mut padded_block_bytes = [0u8; 16];
                 padded_block_bytes[0..block_slice.len()].copy_from_slice(block_slice);
                 padded_block_bytes
-
             };
 
             let block: u128 = u128::from_ne_bytes(block_bytes);
@@ -71,23 +70,17 @@ impl Encrypt {
         }
     }
 
-    fn encrypt_block(key: u128, block: u128) -> u128 {
-
-        println!("{}", block);
+    fn encrypt_block(&self, block: u128) -> u128 {
         let encrypted_block: u128 = 0;
 
-        let key_bytes = key.to_ne_bytes();
         let block_bytes = block.to_ne_bytes();
         let mut encrypted_block_bytes = encrypted_block.to_ne_bytes();
 
-        let mut key_schedule: [u32; 44] = [0; 44];
-
         unsafe {
-            aesni_gen_key_schedule(key_bytes.as_ptr(), key_schedule.as_mut_ptr());
             aesni_encrypt_block(
                 block_bytes.as_ptr(),
                 encrypted_block_bytes.as_mut_ptr(),
-                key_schedule.as_ptr(),
+                self.key_schedule.as_ptr(),
             );
         }
 
@@ -99,9 +92,7 @@ impl Encrypt {
         let mut buf_writer = BufWriter::new(file);
 
         for block in self.plain_text.iter() {
-            //cmp block here to encrypt_block
-            println!("{}", *block);
-            let cyphertext: u128 = Self::encrypt_block(self.key, *block);
+            let cyphertext: u128 = Self::encrypt_block(&self, *block);
             buf_writer.write(&cyphertext.to_ne_bytes()).unwrap();
         }
         buf_writer.flush().unwrap();
@@ -120,11 +111,10 @@ impl Decrypt {
                 // Directly convert the slice to an array if the length is 16
                 block_slice.try_into().expect("slice with incorrect length")
             } else {
-                // Pad the slice with zeros to reach 16 bytes
+                // find better padding method than zeroes
                 let mut padded_block_bytes = [0u8; 16];
                 padded_block_bytes[0..block_slice.len()].copy_from_slice(block_slice);
                 padded_block_bytes
-
             };
 
             let block: u128 = u128::from_ne_bytes(block_bytes);
@@ -150,26 +140,17 @@ impl Decrypt {
         }
     }
 
-    fn decrypt_block(key: u128, block: u128) -> u128 {
+    fn decrypt_block(&self, block: u128) -> u128 {
         let decrypted_block: u128 = 0;
 
-        let key_bytes = key.to_ne_bytes();
         let block_bytes = block.to_ne_bytes();
         let mut decrypted_block_bytes = decrypted_block.to_ne_bytes();
 
-        let mut key_schedule: [u32; 44] = [0; 44];
-        let mut key_schedule_decrypt: [u32; 44] = [0; 44];
-
         unsafe {
-            aesni_gen_key_schedule(key_bytes.as_ptr(), key_schedule.as_mut_ptr());
-            aesni_gen_key_schedule_decrypt(
-                key_schedule.as_ptr(),
-                key_schedule_decrypt.as_mut_ptr(),
-            );
             aesni_decrypt_block(
                 block_bytes.as_ptr(),
                 decrypted_block_bytes.as_mut_ptr(),
-                key_schedule_decrypt.as_ptr(),
+                self.key_schedule_decrypt.as_ptr(),
             );
         }
 
@@ -180,17 +161,27 @@ impl Decrypt {
         let file = fs::File::create(output_path).expect("Unable to create file");
         let mut buf_writer = BufWriter::new(file);
 
-        //this block does not correspond to the ones encrypted
-        for block in self.cypher_text.iter() {
-            let plain_text: u128 = Self::decrypt_block(self.key, *block);
-            buf_writer.write(&plain_text.to_ne_bytes()).unwrap();
+        let len = &self.cypher_text.len();
+
+        for (i, block) in self.cypher_text.iter().enumerate() {
+            let plain_text: u128 = Self::decrypt_block(&self, *block);
+
+            let mut plain_text_bytes = &plain_text.to_ne_bytes()[0..16];
+            if i == len - 1 {
+                let mut j = 16 - 1;
+                while j > 0 && plain_text_bytes[j] == 0 {
+                    plain_text_bytes = &plain_text_bytes[0..j];
+                    j -= 1;
+                }
+            }
+
+            buf_writer.write(plain_text_bytes).unwrap();
         }
         buf_writer.flush().unwrap();
 
         println!("Decryption completed successfully.");
     }
 }
-
 
 //test if file with just '1' and direct encryption of '1' give same result
 
@@ -200,15 +191,13 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt() {
-
-        let key: u128 = 983458937534895;
+        let key: u128 = 987654321;
         let mut key_schedule: [u32; 44] = [0; 44];
         let mut key_schedule_decrypt: [u32; 44] = [0; 44];
         let test_block: u128 = 69;
         let encrypted_block: u128 = 0;
         let decrypted_block: u128 = 0;
 
-        // to_ne_bytes is copying so not ok
         let key_bytes = key.to_ne_bytes();
         let test_block_bytes = test_block.to_ne_bytes();
         let mut encrypted_block_bytes = encrypted_block.to_ne_bytes();
@@ -216,12 +205,25 @@ mod tests {
 
         unsafe {
             aesni_gen_key_schedule(key_bytes.as_ptr(), key_schedule.as_mut_ptr());
-            aesni_encrypt_block(test_block_bytes.as_ptr(), encrypted_block_bytes.as_mut_ptr(), key_schedule.as_ptr());
-            aesni_gen_key_schedule_decrypt(key_schedule.as_ptr(), key_schedule_decrypt.as_mut_ptr());
-            aesni_decrypt_block(encrypted_block_bytes.as_ptr(), decrypted_block_bytes.as_mut_ptr(), key_schedule_decrypt.as_ptr());
+            aesni_encrypt_block(
+                test_block_bytes.as_ptr(),
+                encrypted_block_bytes.as_mut_ptr(),
+                key_schedule.as_ptr(),
+            );
+            aesni_gen_key_schedule_decrypt(
+                key_schedule.as_ptr(),
+                key_schedule_decrypt.as_mut_ptr(),
+            );
+            aesni_decrypt_block(
+                encrypted_block_bytes.as_ptr(),
+                decrypted_block_bytes.as_mut_ptr(),
+                key_schedule_decrypt.as_ptr(),
+            );
         }
 
-        assert_eq!(u128::from_ne_bytes(test_block_bytes), u128::from_ne_bytes(decrypted_block_bytes));
+        assert_eq!(
+            u128::from_ne_bytes(test_block_bytes),
+            u128::from_ne_bytes(decrypted_block_bytes)
+        );
     }
 }
-
