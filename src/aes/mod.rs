@@ -1,3 +1,5 @@
+pub mod gcm;
+
 use std::{
     fs,
     io::{BufWriter, Write},
@@ -22,8 +24,42 @@ extern "C" {
         output_block: *mut u8,
         key_schedule: *const u32,
     );
+    pub(crate) fn pclmul_gf(operand_a: *const u8, operand_b: *const u8, result: *mut u8);
 }
 
+pub(crate) unsafe fn gen_key_schedule(key: [u8; 16]) -> [u32; 44] {
+    let mut key_schedule: [u32; 44] = [0; 44];
+    unsafe {
+        aesni_gen_key_schedule(key.as_ptr(), key_schedule.as_mut_ptr());
+    }
+
+    key_schedule
+}
+
+pub(crate) unsafe fn encrypt(key_schedule: [u32; 44], plain_text: [u8; 16]) -> [u8; 16] {
+    let mut cypher_text: [u8; 16] = [0; 16];
+    unsafe {
+        aesni_encrypt_block(
+            plain_text.as_ptr(),
+            cypher_text.as_mut_ptr(),
+            key_schedule.as_ptr(),
+        );
+    }
+
+    cypher_text
+}
+
+pub(crate) unsafe fn mul_gf(operand_a: [u8; 16], operand_b: [u8; 16]) -> [u8; 16] {
+    let mut product: [u8; 16] = [0; 16];
+
+    unsafe {
+        pclmul_gf(operand_a.as_ptr(), operand_b.as_ptr(), product.as_mut_ptr());
+    }
+
+    product
+}
+
+//////////////
 pub struct Encrypt {
     key: u128,
     key_schedule: [u32; 44],

@@ -1,26 +1,47 @@
 use crate::aes;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::{fs, u128, u8};
-use std::io::{BufWriter, Write};
+use rand::Rng;
 
 // IV IS 96 BIT AND CONCATENATED TO 32 BIT CTR
+// encryption can run in paralell and then sync threads to do writebuf in correct order
+// philosophy of software design + idiomatic rust refactor
+// use borrowed types as arguments over borrowing an owned type -> &T over &Vec<T>
+// dont think default constructor makes sense here
 
+// vectors are not a good idea because we run out of space
+// custom types for aes_block, iv, tag, key_schedule?
+// temporary mutability using nested block
+// return consumed argument on error
+// functional programming and pattern matching instead of ifelse....
+
+// should the struct own the plain text?
+// sould the struct own the cypher?
+// Vec aesBlock { NOT MUTABLE
+// value: u128
+// bytes: [u8; 16] does this even make sense
+// } ?
+// does it make sense to store iv as aesBlock with last 4 bytes as 0
+// make aesBlock from iv and u32 ctr
 pub struct GcmEncrypt {
-    iv: [u8; 96], // random (truly random)
-    key_schedule: [u32; 44], // gen from user key
-    plain_text: Vec<u8>, // file
-    cypher_text: Vec<u8>,
-    tag: u128
+    iv: [u8; 12],            // random (truly random) | owned
+    key_schedule: [u32; 44], // gen from user key | ownded
+    plain_text: Vec<u8>,     // file path buf bufread bufwrite | not owned
+    cypher_text: Vec<u8>,    // path buf | owned
+    tag: [u8; 16],           //first 128 bits of encrypted file | owned
 }
 
 impl GcmEncrypt {
-    pub fn new(key: u128, file: PathBuf) -> Self {
+    pub unsafe fn new(key: u128, file: PathBuf) -> Self {
         let plain_text: Vec<u8> = fs::read(file).expect("Failed to read file");
         let cypher_text: Vec<u8> = vec![0; plain_text.len()];
 
-        let iv: [u8; 96] = [0; 96];
-        let tag: u128 = 0;
-
+        //let iv: [u8; 12] = [0; 12];
+        // https://csrc.nist.gov/pubs/sp/800/38/d/final
+        let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
+        //println!("iv:               {:?}", iv);
+        let tag: [u8; 16] = [0; 16];
         let key_bytes = key.to_ne_bytes();
 
         let key_schedule;
@@ -33,39 +54,44 @@ impl GcmEncrypt {
             key_schedule,
             plain_text,
             cypher_text,
-            tag
+            tag,
         }
     }
 
     pub fn encrypt(&mut self) {
         let mut offset = 0;
 
-        /*
-        self.cypher_text.splice(offset..offset+12, self.iv);
-        offset += 12;
-        */
-
-        let mut ctr_index: u32 = 0;
+        //check index
+        let mut ctr_index: u32 = 1;
         for plain_text_block in self.plain_text.chunks(16) {
 
             let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
-            let ctr: [u8; 16] = ctr_vec.try_into().expect("hehe");
+            let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
 
             let encrypted_counter = Self::encrypt_aes_block(&self, ctr);
 
             let mut cypher_text: [u8; 16] = [0; 16];
-            for i in 0..16 {
-                // what happens on last block?
+            let plain_text_len = plain_text_block.len();
+            for i in 0..plain_text_len {
                 cypher_text[i] = encrypted_counter[i] ^ plain_text_block[i]
             }
 
-            self.cypher_text.splice(offset..offset+16, cypher_text);
+            self.cypher_text.splice(offset..offset + 16, cypher_text);
 
             ctr_index += 1;
             offset += 16;
         }
 
         self.set_tag();
+
+        let file = fs::File::create("/home/alejandro/acnDev/hermetica/src/file.hmtc")
+            .expect("Unable to create file");
+        let mut buf_writer = BufWriter::new(file);
+
+        buf_writer.write(&self.iv).unwrap();
+        buf_writer.write(&self.cypher_text).unwrap();
+        buf_writer.write(&self.tag).unwrap();
+        buf_writer.flush().unwrap();
 
         /*
         let file_buf = fs::File::create(encrypted_file).expect("Unable to create file");
@@ -95,9 +121,8 @@ impl GcmEncrypt {
     }
 
     fn encrypt_aes_block(&self, block_bytes: [u8; 16]) -> [u8; 16] {
-
-
         let encrypted_block_bytes;
+
         unsafe {
             encrypted_block_bytes = aes::encrypt(self.key_schedule, block_bytes);
         }
@@ -110,7 +135,7 @@ impl GcmEncrypt {
         let h = self.encrypt_aes_block(tag);
 
         for cypher_block in self.cypher_text.chunks(16) {
-            let mult_h: [u8; 16] = Self::gf_mult(h, cypher_block.try_into().expect("hehe"));
+            let mult_h: [u8; 16] = Self::gf_mult(h, cypher_block.try_into().expect("hehu"));
 
             for i in 0..16 {
                 tag[i] ^= mult_h[i];
@@ -118,8 +143,10 @@ impl GcmEncrypt {
         }
 
         // xor len
+        // len is 8 need to expand to
+        let len: u128 = self.plain_text.len().try_into().expect("hahu");
         for i in 0..16 {
-            tag[i] ^= self.plain_text.len().to_ne_bytes()[i];
+            tag[i] ^= len.to_ne_bytes()[i];
         }
 
         // iv times h
@@ -130,40 +157,38 @@ impl GcmEncrypt {
             tag[i] ^= mult_last[i];
         }
 
-        self.tag = u128::from_ne_bytes(tag);
+        self.tag = tag;
     }
 
-    fn gf_mult(prod1: [u8; 16], prod2: [u8; 16]) -> [u8; 16] {
-        let mut mult_h: [u8; 16] = [0; 16];
+    fn gf_mult(operand_a: [u8; 16], operand_b: [u8; 16]) -> [u8; 16] {
+        // https://software.intel.com/sites/default/files/managed/72/cc/clmul-wp-rev-2.02-2014-04-20.pdf
 
-        for i in 0..16 {
-            if prod1[i]!= 0 {
-                for j in 0..16 {
-                    mult_h[(i + j) % 16] ^= prod2[j];
-                }
-            }
+        let product;
+        unsafe {
+            product = aes::mul_gf(operand_a, operand_b);
         }
 
-        mult_h
+        product
     }
 }
 
 pub struct GcmDecrypt {
-    iv: u128, //first 128 bits of encrypted file
-    key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt
-    cypher_text: Vec<u8>, //file
-    plain_text: Vec<u8>,
-    tag: u128 //first 128 bits of encrypted file
+    iv: [u8; 12],            // random (truly random) | not owned?
+    key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
+    cypher_text: Vec<u8>,    //file | not owned
+    plain_text: Vec<u8>,   // | owned
+    tag: [u8; 16], //first 128 bits of encrypted file // | not owned
 }
 
 impl GcmDecrypt {
-    pub fn new(key: u128, file: PathBuf) -> Self{
-        let cypher_text: Vec<u8> = fs::read(file).expect("Failed to read file");
-        let plain_text: Vec<u8> = vec![0; cypher_text.len() - 32];
+    pub fn new(key: u128, file: PathBuf) -> Self {
+        let file_data: Vec<u8> = fs::read(file).expect("Failed to read file");
+        let plain_text: Vec<u8> = vec![0; file_data.len() - 28];
 
-        let len = cypher_text.len();
-        let iv: u128 = u128::from_ne_bytes(cypher_text[..16].try_into().expect("hehe")); // First 16 bytes
-        let tag: u128 = u128::from_ne_bytes(cypher_text[len - 16..].try_into().expect("hehe")); // Last 16 bytes
+        let len = file_data.len();
+        let iv: [u8; 12] = file_data[..12].try_into().expect("hehu"); // First 16 bytes
+        let tag: [u8; 16] = file_data[len - 16..].try_into().expect("hwh"); // Last 16 bytes
+        let cypher_text: Vec<u8> = file_data[12..len - 16].try_into().expect("wawa");
 
         let key_bytes = key.to_ne_bytes();
 
@@ -172,24 +197,22 @@ impl GcmDecrypt {
             key_schedule = aes::gen_key_schedule(key_bytes);
         }
 
-
         Self {
             iv,
             key_schedule,
             cypher_text,
             plain_text,
-            tag
+            tag,
         }
     }
 
     pub fn decrypt(&mut self) {
-        let mut offset = 0;
-
         /*
         self.cypher_text.splice(offset..offset+16, self.iv.to_ne_bytes());
         offset += 16;
         */
 
+        /*
         let mut ctr: u128 = self.iv;
         for plain_text_block in self.plain_text.chunks(16) {
             let encrypted_counter  = Self::encrypt_aes_block(&self, ctr.to_ne_bytes());
@@ -207,10 +230,50 @@ impl GcmDecrypt {
         }
 
         //self.set_tag();
+        */
+
+        let mut offset = 0;
+
+        /*
+        self.cypher_text.splice(offset..offset+12, self.iv);
+        offset += 12;
+        */
+
+        //check index
+        let mut ctr_index: u32 = 1;
+        for cypher_text_block in self.cypher_text.chunks(16) {
+            //if smaller than 16 need to expand or not xor the missing part
+
+            let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
+            let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
+
+            let encrypted_counter = Self::encrypt_aes_block(&self, ctr);
+
+            let mut plain_text: [u8; 16] = [0; 16];
+            let hehe_len = cypher_text_block.len();
+            for i in 0..hehe_len {
+                // what happens on last block?
+                plain_text[i] = encrypted_counter[i] ^ cypher_text_block[i]
+            }
+
+            self.plain_text.splice(offset..offset + 16, plain_text);
+
+            ctr_index += 1;
+            offset += 16;
+        }
+
+        self.set_tag();
+
+        let file = fs::File::create("/home/alejandro/acnDev/hermetica/src/decypher.txt")
+            .expect("Unable to create file");
+        let mut buf_writer = BufWriter::new(file);
+
+        buf_writer.write(&self.plain_text).unwrap();
+        buf_writer.flush().unwrap();
     }
 
+    // this should not be a method but parent module functionality
     fn encrypt_aes_block(&self, block_bytes: [u8; 16]) -> [u8; 16] {
-
         let encrypted_block_bytes;
         unsafe {
             encrypted_block_bytes = aes::encrypt(self.key_schedule, block_bytes);
@@ -218,6 +281,48 @@ impl GcmDecrypt {
 
         encrypted_block_bytes
     }
+
+    //make sure this is ok, also probably should not be a method
+    fn set_tag(&mut self) {
+        let mut tag: [u8; 16] = [0; 16];
+        let h = self.encrypt_aes_block(tag);
+
+        for cypher_block in self.cypher_text.chunks(16) {
+            let mult_h: [u8; 16] = Self::gf_mult(h, cypher_block.try_into().expect("hehu"));
+
+            for i in 0..16 {
+                tag[i] ^= mult_h[i];
+            }
+        }
+
+        // xor len
+        let len: u128 = self.plain_text.len().try_into().expect("hahu");
+        for i in 0..16 {
+            tag[i] ^= len.to_ne_bytes()[i];
+        }
+
+        // iv times h
+        let iv: Vec<u8> = self.iv.into_iter().chain([0, 0, 0, 0]).collect();
+        let mult_last: [u8; 16] = Self::gf_mult(iv.try_into().expect("guarrada gorda"), h);
+
+        for i in 0..16 {
+            tag[i] ^= mult_last[i];
+        }
+
+        assert_eq!(tag, self.tag);
+        // println!("file tag:         {:?}", tag);
+        // println!("calculated tag:   {:?}", self.tag);
+    }
+
+    // should not be a method
+    fn gf_mult(operand_a: [u8; 16], operand_b: [u8; 16]) -> [u8; 16] {
+        // https://software.intel.com/sites/default/files/managed/72/cc/clmul-wp-rev-2.02-2014-04-20.pdf
+
+        let product;
+        unsafe {
+            product = aes::mul_gf(operand_a, operand_b);
+        }
+
+        product
+    }
 }
-
-
