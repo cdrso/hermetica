@@ -1,9 +1,9 @@
 section .text
-global aesni_gen_key_schedule
+global aesni_gen_encryption_key_schedule
 
     ; &key in rdi
     ; &key_schedule in rsi
-aesni_gen_key_schedule:
+aesni_gen_encryption_key_schedule:
     ; Load the original 128-bit key from the address in rdi into xmm1
     movdqu xmm1, [rdi]
 

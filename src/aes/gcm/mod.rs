@@ -1,3 +1,325 @@
+pub mod clmul;
+use crate::aes;
+use rand::Rng;
+use std::error::Error;
+use std::fs;
+use std::fs::File;
+use std::io::BufReader;
+use std::io::BufWriter;
+use std::path::PathBuf;
+use std::io::Read;
+use std::io::Write;
+
+// https://software.intel.com/sites/default/files/managed/72/cc/clmul-wp-rev-2.02-2014-04-20.pdf
+
+pub(crate) fn gf_mult(operand_a: [u8; 16], operand_b: [u8; 16]) -> [u8; 16] {
+    let mut product: [u8; 16] = [0; 16];
+    unsafe {
+        clmul::clmul_gf(operand_a.as_ptr(), operand_b.as_ptr(), product.as_mut_ptr());
+    }
+
+    product
+}
+
+pub(crate) fn gen_tag(iv: [u8; 12], encryption_key_schedule: [u32; 44], cypher_text: &Vec<u8>) -> [u8;16] {
+    let mut tag: [u8; 16] = [0; 16];
+    let h = aes::encrypt_block(encryption_key_schedule, tag);
+
+    for cypher_block in cypher_text.chunks(16) {
+        let mult_h: [u8; 16] = gf_mult(h, cypher_block.try_into().expect("hehu"));
+
+        for i in 0..16 {
+            tag[i] ^= mult_h[i];
+        }
+    }
+
+    // xor len
+    // len is 8 need to expand to
+    let len: u128 = cypher_text.len().try_into().expect("hahu");
+    for i in 0..16 {
+        tag[i] ^= len.to_ne_bytes()[i];
+    }
+
+    // iv times h
+    let iv: Vec<u8> = iv.into_iter().chain([0, 0, 0, 0]).collect();
+    let mult_last: [u8; 16] = gf_mult(iv.try_into().expect("guarrada gorda"), h);
+
+    for i in 0..16 {
+        tag[i] ^= mult_last[i];
+    }
+
+    tag
+}
+
+pub struct GcmEncrypt {
+    iv: [u8; 12],            // random (truly random) | owned
+    key_schedule: [u32; 44], // gen from user key | ownded
+    plain_text: PathBuf,     // file path buf bufread bufwrite | not owned
+    length: u64,
+    cypher_text: Vec<u8>,    // path buf | owned
+    tag: Option<[u8; 16]>,           //first 128 bits of encrypted file | owned
+}
+
+impl GcmEncrypt {
+    pub fn new(key: u128, plain_text: PathBuf) -> Result<GcmEncrypt, Box<dyn Error>> {
+        let length = fs::metadata(&plain_text)?.len();
+        println!("encryption length: {:?}", length);
+
+        // fix this, constant reallocs if empty at the start
+        // cuidado puede faltar o sobrar pading TODO bc of ctr encryption
+        let cypher_text: Vec<u8> = vec![0; length.try_into()?];
+
+        // https://csrc.nist.gov/pubs/sp/800/38/d/final
+        let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
+        println!("encryption IV: {:?}", iv);
+
+        let tag = None;
+
+        let key_schedule = aes::gen_encryption_key_schedule(key.to_ne_bytes());
+
+        Ok(Self {
+            iv,
+            key_schedule,
+            plain_text,
+            length,
+            cypher_text,
+            tag,
+        })
+    }
+
+    pub fn encrypt(mut self) -> Result<(), Box<dyn Error>> {
+        let file = File::open(&self.plain_text)?;
+        let mut reader = BufReader::new(file);
+
+        let mut offset = 0;
+        let mut ctr_index: u32 = 1;
+        let mut buffer: [u8; 16] = [0; 16];
+
+        let mut tag: [u8; 16] = [0; 16];
+        let h = aes::encrypt_block(self.key_schedule, tag);
+
+        //cuidado parece que estamos fuera de len
+        //no tiene pq ser divisible por 16 puede haber resto
+
+        let read_range = match self.length%16 {
+            0 => self.length/16,
+            _ => self.length/16 + 1
+        };
+
+        for _ in 0..read_range {
+            let bytes_read = reader.read(&mut buffer)?;
+
+            if bytes_read != 16 {
+                println!("encryption bytes read buffer: {}", bytes_read);
+            }
+
+            let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
+            let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
+
+            let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
+            let mut cypher_text: [u8; 16] = [0; 16];
+
+            for i in 0..bytes_read {
+                cypher_text[i] = encrypted_counter[i] ^ buffer[i];
+            }
+
+            let mult_h: [u8; 16] = gf_mult(h, cypher_text);
+            for i in 0..16 {
+                tag[i] ^= mult_h[i];
+            }
+
+            self.cypher_text.splice(offset..offset + bytes_read, cypher_text);
+
+            ctr_index += 1;
+            offset += bytes_read;
+        }
+
+        for i in 0..16 {
+            tag[i] ^= u128::from(self.length).to_ne_bytes()[i];
+        }
+
+        let iv: Vec<u8> = self.iv.into_iter().chain([0, 0, 0, 0]).collect();
+        let mult_last: [u8; 16] = gf_mult(iv.try_into().expect("guarrada gorda"), h);
+
+        for i in 0..16 {
+            tag[i] ^= mult_last[i];
+        }
+
+        self.tag = Some(tag);
+        //self.tag = Some(gen_tag(self.iv, self.key_schedule, &self.cypher_text));
+        println!("computed tag on encryption: {:?}", self.tag);
+
+        let output_file = fs::File::create("/home/alejandro/acnDev/hermetica/test_files/file.hmtc")
+            .expect("Unable to create file");
+        let mut buf_writer = BufWriter::new(output_file);
+
+        buf_writer.write(&self.iv)?;
+        buf_writer.write(&self.cypher_text)?;
+        buf_writer.write(&self.tag.unwrap())?;
+        buf_writer.flush()?;
+
+        Ok(())
+
+        /*
+        //check index
+        for plain_text_block in self.plain_text.chunks(16) {
+            let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
+            let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
+
+            let encrypted_counter = encrypt_aes_block(&self, ctr);
+
+            let mut cypher_text: [u8; 16] = [0; 16];
+            let plain_text_len = plain_text_block.len();
+            for i in 0..plain_text_len {
+                cypher_text[i] = encrypted_counter[i] ^ plain_text_block[i]
+            }
+
+            self.cypher_text.splice(offset..offset + 16, cypher_text);
+
+            ctr_index += 1;
+            offset += 16;
+        }
+
+        self.set_tag();
+
+        let file = fs::File::create("/home/alejandro/acnDev/hermetica/src/file.hmtc")
+            .expect("Unable to create file");
+        let mut buf_writer = BufWriter::new(file);
+
+        buf_writer.write(&self.iv).unwrap();
+        buf_writer.write(&self.cypher_text).unwrap();
+        buf_writer.write(&self.tag).unwrap();
+        buf_writer.flush().unwrap();
+        */
+    }
+
+}
+
+pub struct GcmDecrypt {
+    iv: Option<[u8; 12]>,            // random (truly random) | not owned?
+    key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
+    cypher_text: PathBuf,    //file | not owned
+    length: u64,
+    plain_text: Vec<u8>,    // | owned
+    tag: Option<[u8; 16]>,          //first 128 bits of encrypted file // | not owned
+}
+
+impl GcmDecrypt {
+    pub fn new(key: u128, cypher_text: PathBuf) -> Result<GcmDecrypt, Box<dyn Error>> {
+        //let plain_text: &[u8] = fs::read(file).expect("Failed to read file").as_slice();
+
+        let length = fs::metadata(&cypher_text)?.len()-28; //12 bytes IV 16 bytes tag
+        println!("decryption length: {:?}", length);
+
+        // fix this, constant reallocs if empty at the start
+        let plain_text: Vec<u8> = vec![0; length.try_into()?];
+
+        // https://csrc.nist.gov/pubs/sp/800/38/d/final
+        // let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
+
+        // let tag: [u8; 16] = [0; 16];
+
+        let key_schedule = aes::gen_encryption_key_schedule(key.to_ne_bytes());
+
+        Ok(Self {
+            iv: None,
+            key_schedule,
+            plain_text,
+            length,
+            cypher_text,
+            tag: None,
+        })
+    }
+
+    pub fn decrypt(mut self) -> Result<(), Box<dyn Error>> {
+        let file = File::open(&self.cypher_text)?;
+        let mut reader = BufReader::new(file);
+
+        let mut offset = 0;
+        let mut ctr_index: u32 = 1;
+        let mut iv_buffer: [u8; 12] = [0; 12];
+        let mut cypher_buffer: [u8; 16] = [0; 16];
+        let mut tag_buffer: [u8; 16] = [0; 16];
+
+        let bytes_read = reader.read(&mut iv_buffer)?;
+        assert_eq!(bytes_read, 12);
+
+        self.iv = Some(iv_buffer);
+        println!("decryption IV: {:?}", self.iv);
+
+        // 12..len-16
+
+        let mut tag: [u8; 16] = [0; 16];
+        let h = aes::encrypt_block(self.key_schedule, tag);
+
+        for j in 0..(self.length/16) {
+            let bytes_read = reader.read(&mut cypher_buffer)?;
+            //this assert fails
+
+            // wtf block 511
+            // breaks on block 511 no matter the file why wtf
+            if bytes_read != 16 {
+                println!("ctr: {}", j);
+            }
+
+            let ctr_vec: Vec<u8> = self.iv.unwrap().into_iter().chain(ctr_index.to_ne_bytes()).collect();
+            let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
+
+            let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
+            let mut plain_text: [u8; 16] = [0; 16];
+
+            for i in 0..bytes_read {
+                plain_text[i] = encrypted_counter[i] ^ cypher_buffer[i];
+            }
+
+            let mult_h: [u8; 16] = gf_mult(h, cypher_buffer.try_into().expect("hehu"));
+            for i in 0..16 {
+                tag[i] ^= mult_h[i];
+            }
+
+            self.plain_text.splice(offset..offset + 16, plain_text);
+
+            ctr_index += 1;
+            offset += 16;
+        }
+
+        for i in 0..16 {
+            //check
+            tag[i] ^= u128::from(self.length).to_ne_bytes()[i];
+        }
+
+        let iv: Vec<u8> = self.iv.unwrap().into_iter().chain([0, 0, 0, 0]).collect();
+        let mult_last: [u8; 16] = gf_mult(iv.try_into().expect("guarrada gorda"), h);
+
+        for i in 0..16 {
+            tag[i] ^= mult_last[i];
+        }
+
+        let bytes_read = reader.read(&mut tag_buffer)?;
+        assert_eq!(bytes_read, 16);
+
+        println!("computed tag on decryption: {:?}", tag_buffer);
+        println!("file tag: {:?}", self.tag);
+
+        // need to compute tag and compare to read from file
+        // assert!(self.tag == tag_buffer);
+
+        // tag is last 16 bytes
+
+        let output_file = fs::File::create("/home/alejandro/acnDev/hermetica/test_files/decypher.txt")
+            .expect("Unable to create file");
+        let mut buf_writer = BufWriter::new(output_file);
+
+        buf_writer.write(&self.plain_text)?;
+        buf_writer.flush()?;
+
+        Ok(())
+    }
+}
+
+/*
+///////////////////////////////////
+
 use crate::aes;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -326,3 +648,4 @@ impl GcmDecrypt {
         product
     }
 }
+*/

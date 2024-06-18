@@ -1,5 +1,59 @@
+pub mod aes_ni;
 pub mod gcm;
 
+pub(crate) fn gen_encryption_key_schedule(key: [u8; 16]) -> [u32; 44] {
+    let mut encryption_key_schedule: [u32; 44] = [0; 44];
+    unsafe {
+        aes_ni::aesni_gen_encryption_key_schedule(
+            key.as_ptr(),
+            encryption_key_schedule.as_mut_ptr(),
+        );
+    }
+
+    encryption_key_schedule
+}
+
+pub(crate) fn gen_decryption_key_schedule(encryption_key_schedule: [u32; 44]) -> [u32; 44] {
+    let mut decryption_key_schedule: [u32; 44] = [0; 44];
+    unsafe {
+        aes_ni::aesni_gen_decryption_key_schedule(
+            encryption_key_schedule.as_ptr(),
+            decryption_key_schedule.as_mut_ptr(),
+        )
+    }
+
+    decryption_key_schedule
+}
+
+pub(crate) fn encrypt_block(encryption_key_schedule: [u32; 44], plain_text: [u8; 16]) -> [u8; 16] {
+    let mut cypher_text: [u8; 16] = [0; 16];
+    unsafe {
+        aes_ni::aesni_encrypt_block(
+            plain_text.as_ptr(),
+            cypher_text.as_mut_ptr(),
+            encryption_key_schedule.as_ptr(),
+        );
+    }
+
+    cypher_text
+}
+
+pub(crate) fn decrypt_block(decryption_key_schedule: [u32; 44], cypher_text: [u8; 16]) -> [u8; 16] {
+    let mut plain_text: [u8; 16] = [0; 16];
+
+    unsafe {
+        aes_ni::aesni_decrypt_block(
+            cypher_text.as_ptr(),
+            plain_text.as_mut_ptr(),
+            decryption_key_schedule.as_ptr(),
+        );
+    }
+
+    plain_text
+}
+
+/*
+///////////////////////////////////////////////////////////////////////
 use std::{
     fs,
     io::{BufWriter, Write},
@@ -263,3 +317,4 @@ mod tests {
         );
     }
 }
+*/

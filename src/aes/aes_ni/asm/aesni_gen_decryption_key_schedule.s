@@ -1,9 +1,9 @@
 section .text
-global aesni_gen_key_schedule_decrypt
+global aesni_gen_decryption_key_schedule
 
-    ; &key_schedule in rdi
-    ; &key_schedule_decrypt in rsi
-aesni_gen_key_schedule_decrypt:
+    ; &encryption_key_schedule in rdi
+    ; &decryption_key_schedule in rsi
+aesni_gen_decryption_key_schedule:
     movdqu xmm1, [rdi]
     movdqu [rsi], xmm1
     add rdi, 0x10

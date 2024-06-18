@@ -1,10 +1,10 @@
 section .text
-global pclmul_gf
+global clmul_gf
 
     ; &operand_1 in rdi
     ; &operand_2 in rsi
     ; &result in rdx
-pclmul_gf:
+clmul_gf:
     ; operand_1 in xmm0
     movdqu      xmm0, [rdi]
 
