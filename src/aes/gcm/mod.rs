@@ -21,35 +21,7 @@ pub(crate) fn gf_mult(operand_a: [u8; 16], operand_b: [u8; 16]) -> [u8; 16] {
     product
 }
 
-pub(crate) fn gen_tag(iv: [u8; 12], encryption_key_schedule: [u32; 44], cypher_text: &Vec<u8>) -> [u8;16] {
-    let mut tag: [u8; 16] = [0; 16];
-    let h = aes::encrypt_block(encryption_key_schedule, tag);
-
-    for cypher_block in cypher_text.chunks(16) {
-        let mult_h: [u8; 16] = gf_mult(h, cypher_block.try_into().expect("hehu"));
-
-        for i in 0..16 {
-            tag[i] ^= mult_h[i];
-        }
-    }
-
-    // xor len
-    // len is 8 need to expand to
-    let len: u128 = cypher_text.len().try_into().expect("hahu");
-    for i in 0..16 {
-        tag[i] ^= len.to_ne_bytes()[i];
-    }
-
-    // iv times h
-    let iv: Vec<u8> = iv.into_iter().chain([0, 0, 0, 0]).collect();
-    let mult_last: [u8; 16] = gf_mult(iv.try_into().expect("guarrada gorda"), h);
-
-    for i in 0..16 {
-        tag[i] ^= mult_last[i];
-    }
-
-    tag
-}
+// last block is not 128 bits but the size of the plain text, discard the rest
 
 pub struct GcmEncrypt {
     iv: [u8; 12],            // random (truly random) | owned
@@ -63,10 +35,7 @@ pub struct GcmEncrypt {
 impl GcmEncrypt {
     pub fn new(key: u128, plain_text: PathBuf) -> Result<GcmEncrypt, Box<dyn Error>> {
         let length = fs::metadata(&plain_text)?.len();
-        println!("encryption length: {:?}", length);
 
-        // fix this, constant reallocs if empty at the start
-        // cuidado puede faltar o sobrar pading TODO bc of ctr encryption
         let cypher_text: Vec<u8> = vec![0; length.try_into()?];
 
         // https://csrc.nist.gov/pubs/sp/800/38/d/final
@@ -98,20 +67,13 @@ impl GcmEncrypt {
         let mut tag: [u8; 16] = [0; 16];
         let h = aes::encrypt_block(self.key_schedule, tag);
 
-        //cuidado parece que estamos fuera de len
-        //no tiene pq ser divisible por 16 puede haber resto
-
         let read_range = match self.length%16 {
             0 => self.length/16,
             _ => self.length/16 + 1
         };
 
-        for _ in 0..read_range {
-            let bytes_read = reader.read(&mut buffer)?;
-
-            if bytes_read != 16 {
-                println!("encryption bytes read buffer: {}", bytes_read);
-            }
+        for _ in 0..read_range - 1 {
+            reader.read_exact(&mut buffer)?;
 
             let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
             let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
@@ -119,7 +81,7 @@ impl GcmEncrypt {
             let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
             let mut cypher_text: [u8; 16] = [0; 16];
 
-            for i in 0..bytes_read {
+            for i in 0..16 {
                 cypher_text[i] = encrypted_counter[i] ^ buffer[i];
             }
 
@@ -128,11 +90,31 @@ impl GcmEncrypt {
                 tag[i] ^= mult_h[i];
             }
 
-            self.cypher_text.splice(offset..offset + bytes_read, cypher_text);
+            self.cypher_text.splice(offset..offset + 16, cypher_text);
 
             ctr_index += 1;
-            offset += bytes_read;
+            offset += 16;
         }
+
+        let bytes_read = reader.read(&mut buffer)?;
+
+        let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
+        let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
+
+        let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
+        let mut cypher_text: [u8; 16] = [0; 16];
+
+        for i in 0..bytes_read {
+            cypher_text[i] = encrypted_counter[i] ^ buffer[i];
+        }
+
+        let mult_h: [u8; 16] = gf_mult(h, cypher_text);
+        for i in 0..16 {
+            tag[i] ^= mult_h[i];
+        }
+
+        self.cypher_text.splice(offset..offset + bytes_read, cypher_text);
+
 
         for i in 0..16 {
             tag[i] ^= u128::from(self.length).to_ne_bytes()[i];
@@ -146,8 +128,6 @@ impl GcmEncrypt {
         }
 
         self.tag = Some(tag);
-        //self.tag = Some(gen_tag(self.iv, self.key_schedule, &self.cypher_text));
-        println!("computed tag on encryption: {:?}", self.tag);
 
         let output_file = fs::File::create("/home/alejandro/acnDev/hermetica/test_files/file.hmtc")
             .expect("Unable to create file");
@@ -159,38 +139,6 @@ impl GcmEncrypt {
         buf_writer.flush()?;
 
         Ok(())
-
-        /*
-        //check index
-        for plain_text_block in self.plain_text.chunks(16) {
-            let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
-            let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
-
-            let encrypted_counter = encrypt_aes_block(&self, ctr);
-
-            let mut cypher_text: [u8; 16] = [0; 16];
-            let plain_text_len = plain_text_block.len();
-            for i in 0..plain_text_len {
-                cypher_text[i] = encrypted_counter[i] ^ plain_text_block[i]
-            }
-
-            self.cypher_text.splice(offset..offset + 16, cypher_text);
-
-            ctr_index += 1;
-            offset += 16;
-        }
-
-        self.set_tag();
-
-        let file = fs::File::create("/home/alejandro/acnDev/hermetica/src/file.hmtc")
-            .expect("Unable to create file");
-        let mut buf_writer = BufWriter::new(file);
-
-        buf_writer.write(&self.iv).unwrap();
-        buf_writer.write(&self.cypher_text).unwrap();
-        buf_writer.write(&self.tag).unwrap();
-        buf_writer.flush().unwrap();
-        */
     }
 
 }
@@ -206,19 +154,8 @@ pub struct GcmDecrypt {
 
 impl GcmDecrypt {
     pub fn new(key: u128, cypher_text: PathBuf) -> Result<GcmDecrypt, Box<dyn Error>> {
-        //let plain_text: &[u8] = fs::read(file).expect("Failed to read file").as_slice();
-
         let length = fs::metadata(&cypher_text)?.len()-28; //12 bytes IV 16 bytes tag
-        println!("decryption length: {:?}", length);
-
-        // fix this, constant reallocs if empty at the start
         let plain_text: Vec<u8> = vec![0; length.try_into()?];
-
-        // https://csrc.nist.gov/pubs/sp/800/38/d/final
-        // let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
-
-        // let tag: [u8; 16] = [0; 16];
-
         let key_schedule = aes::gen_encryption_key_schedule(key.to_ne_bytes());
 
         Ok(Self {
@@ -241,26 +178,20 @@ impl GcmDecrypt {
         let mut cypher_buffer: [u8; 16] = [0; 16];
         let mut tag_buffer: [u8; 16] = [0; 16];
 
-        let bytes_read = reader.read(&mut iv_buffer)?;
-        assert_eq!(bytes_read, 12);
+        reader.read_exact(&mut iv_buffer)?;
 
         self.iv = Some(iv_buffer);
-        println!("decryption IV: {:?}", self.iv);
-
-        // 12..len-16
 
         let mut tag: [u8; 16] = [0; 16];
         let h = aes::encrypt_block(self.key_schedule, tag);
 
-        for j in 0..(self.length/16) {
-            let bytes_read = reader.read(&mut cypher_buffer)?;
-            //this assert fails
+        let read_range = match self.length%16 {
+            0 => self.length/16,
+            _ => self.length/16 + 1
+        };
 
-            // wtf block 511
-            // breaks on block 511 no matter the file why wtf
-            if bytes_read != 16 {
-                println!("ctr: {}", j);
-            }
+        for _ in 0..(read_range - 1) {
+            reader.read_exact(&mut cypher_buffer)?;
 
             let ctr_vec: Vec<u8> = self.iv.unwrap().into_iter().chain(ctr_index.to_ne_bytes()).collect();
             let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
@@ -268,7 +199,7 @@ impl GcmDecrypt {
             let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
             let mut plain_text: [u8; 16] = [0; 16];
 
-            for i in 0..bytes_read {
+            for i in 0..16 {
                 plain_text[i] = encrypted_counter[i] ^ cypher_buffer[i];
             }
 
@@ -282,6 +213,25 @@ impl GcmDecrypt {
             ctr_index += 1;
             offset += 16;
         }
+
+        let bytes_read = reader.read(&mut cypher_buffer)?;
+
+        let ctr_vec: Vec<u8> = self.iv.unwrap().into_iter().chain(ctr_index.to_ne_bytes()).collect();
+        let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
+
+        let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
+        let mut plain_text: [u8; 16] = [0; 16];
+
+        for i in 0..bytes_read {
+            plain_text[i] = encrypted_counter[i] ^ cypher_buffer[i];
+        }
+
+        let mult_h: [u8; 16] = gf_mult(h, cypher_buffer.try_into().expect("hehu"));
+        for i in 0..16 {
+            tag[i] ^= mult_h[i];
+        }
+
+        self.plain_text.splice(offset..offset + bytes_read, plain_text);
 
         for i in 0..16 {
             //check
@@ -297,9 +247,6 @@ impl GcmDecrypt {
 
         let bytes_read = reader.read(&mut tag_buffer)?;
         assert_eq!(bytes_read, 16);
-
-        println!("computed tag on decryption: {:?}", tag_buffer);
-        println!("file tag: {:?}", self.tag);
 
         // need to compute tag and compare to read from file
         // assert!(self.tag == tag_buffer);
