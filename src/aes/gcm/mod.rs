@@ -36,11 +36,11 @@ impl GcmEncrypt {
     pub fn new(key: u128, plain_text: PathBuf) -> Result<GcmEncrypt, Box<dyn Error>> {
         let length = fs::metadata(&plain_text)?.len();
 
+        // check
         let cypher_text: Vec<u8> = vec![0; length.try_into()?];
 
         // https://csrc.nist.gov/pubs/sp/800/38/d/final
         let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
-        println!("encryption IV: {:?}", iv);
 
         let tag = None;
 
@@ -97,6 +97,7 @@ impl GcmEncrypt {
         }
 
         let bytes_read = reader.read(&mut buffer)?;
+        println!("bytes read last block: {}", bytes_read);
 
         let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
         let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
@@ -113,13 +114,19 @@ impl GcmEncrypt {
             tag[i] ^= mult_h[i];
         }
 
-        self.cypher_text.splice(offset..offset + bytes_read, cypher_text);
+        // hay que hacer esto, splice no funciona si no
+        let last_cypher_text_vec = cypher_text[0..bytes_read].to_vec();
+
+        self.cypher_text.splice(offset..offset + bytes_read, last_cypher_text_vec);
+        assert_eq!(offset+bytes_read, self.length.try_into()?);
 
 
+        // add lenght to tag
         for i in 0..16 {
             tag[i] ^= u128::from(self.length).to_ne_bytes()[i];
         }
 
+        // add iv || 0 to tag
         let iv: Vec<u8> = self.iv.into_iter().chain([0, 0, 0, 0]).collect();
         let mult_last: [u8; 16] = gf_mult(iv.try_into().expect("guarrada gorda"), h);
 
@@ -178,6 +185,9 @@ impl GcmDecrypt {
         let mut cypher_buffer: [u8; 16] = [0; 16];
         let mut tag_buffer: [u8; 16] = [0; 16];
 
+        //calculate last cypher block lenght
+        //metadata - iv - tag
+
         reader.read_exact(&mut iv_buffer)?;
 
         self.iv = Some(iv_buffer);
@@ -185,7 +195,8 @@ impl GcmDecrypt {
         let mut tag: [u8; 16] = [0; 16];
         let h = aes::encrypt_block(self.key_schedule, tag);
 
-        let read_range = match self.length%16 {
+        let remainder = self.length % 16;
+        let read_range = match remainder {
             0 => self.length/16,
             _ => self.length/16 + 1
         };
@@ -214,7 +225,16 @@ impl GcmDecrypt {
             offset += 16;
         }
 
-        let bytes_read = reader.read(&mut cypher_buffer)?;
+        let mut last_cypher_buffer = match remainder {
+            0 => vec![0; 16],
+            _ => vec![0; remainder.try_into()?]
+        };
+
+        // aquí bytes read no debería ser 16 si no el len del cypher
+        // read exact remainder o 16
+        // el remainder no se guarda un block en el cyher si no que solo lo correspondiente
+        // al cifrado original
+        let bytes_read = reader.read_exact(&mut last_cypher_buffer)?;
 
         let ctr_vec: Vec<u8> = self.iv.unwrap().into_iter().chain(ctr_index.to_ne_bytes()).collect();
         let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
@@ -222,16 +242,26 @@ impl GcmDecrypt {
         let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
         let mut plain_text: [u8; 16] = [0; 16];
 
-        for i in 0..bytes_read {
-            plain_text[i] = encrypted_counter[i] ^ cypher_buffer[i];
+        for i in 0..last_cypher_buffer.len() {
+            plain_text[i] = encrypted_counter[i] ^ last_cypher_buffer[i];
         }
 
-        let mult_h: [u8; 16] = gf_mult(h, cypher_buffer.try_into().expect("hehu"));
+        let mut last_cypher_buffer_mult: Vec<u8> = last_cypher_buffer.clone(); //.resize_with(16, || 0);
+        last_cypher_buffer_mult.resize_with(16, || 0);
+
+        let mult_h: [u8; 16] = gf_mult(h, last_cypher_buffer_mult.try_into().expect("hehe"));
         for i in 0..16 {
             tag[i] ^= mult_h[i];
         }
 
-        self.plain_text.splice(offset..offset + bytes_read, plain_text);
+        // hay que hacer esto, splice no funciona si no
+        let last_plain_text_vec = plain_text[0..last_cypher_buffer.len()].to_vec();
+
+        //bytes read va a ser siempre 16
+        self.plain_text.splice(offset..offset + last_cypher_buffer.len(), last_plain_text_vec);
+        assert_eq!(offset + last_cypher_buffer.len(), self.length.try_into()?);
+        println!("cypher length:    {}", self.length);
+        println!("decypher length:  {}", offset + last_cypher_buffer.len());
 
         for i in 0..16 {
             //check
@@ -245,8 +275,7 @@ impl GcmDecrypt {
             tag[i] ^= mult_last[i];
         }
 
-        let bytes_read = reader.read(&mut tag_buffer)?;
-        assert_eq!(bytes_read, 16);
+        let bytes_read = reader.read_exact(&mut tag_buffer)?;
 
         // need to compute tag and compare to read from file
         // assert!(self.tag == tag_buffer);
