@@ -73,13 +73,91 @@ impl GcmEncrypt {
 
         buf_writer.write(&self.iv)?;
 
-        let mut offset = 0;
-        let mut ctr_index: u32 = 1;
-        let mut read_buffer: [u8; 16] = [0; 16];
-
         let mut tag: [u8; 16] = [0; 16];
         let h = aes::encrypt_block(self.key_schedule, tag);
 
+        let mut offset = 0;
+        let mut ctr_index: u32 = 1;
+
+        // each bufread read will be 1MB
+        let mut read_buffer: [u8; 1048576] = [0; 1048576];
+
+        // how many 1MB reads are necesary for the entire file
+        let mut bufread_cnt = self.length / read_buffer.len();
+        if self.length % read_buffer.len() != 0 {
+            bufread_cnt += 1;
+        }
+
+        // from 0 to bufread_cnt-1 read_exact read_buffer of 1MB
+        // last bufread read_exact last buffer size
+
+        // need to keep offset
+        for _ in 0..(bufread_cnt-1) {
+            reader.read_exact(&mut read_buffer)?;
+            for _ in 0..(1048576 / 16) {
+                let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
+                let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
+
+                let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
+                let mut cypher_text: [u8; 16] = [0; 16];
+
+                for i in 0..16 {
+                    cypher_text[i] = encrypted_counter[i] ^ read_buffer[offset..offset+16][i];
+                }
+
+                let mult_h: [u8; 16] = gf_mult(h, cypher_text);
+                for i in 0..16 {
+                    tag[i] ^= mult_h[i];
+                }
+
+                buf_writer.write(&cypher_text)?;
+
+                ctr_index += 1;
+                offset += 16;
+            }
+            // write every 1MB
+            buf_writer.flush();
+        }
+
+        reader.read_exact(&mut read_buffer_last)?;
+        for _ in 0..(1048576 / 16) {
+            let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
+            let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
+
+            let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
+            let mut cypher_text: [u8; 16] = [0; 16];
+
+            for i in 0..16 {
+                cypher_text[i] = encrypted_counter[i] ^ read_buffer[offset..offset+16][i];
+            }
+
+            let mult_h: [u8; 16] = gf_mult(h, cypher_text);
+            for i in 0..16 {
+                tag[i] ^= mult_h[i];
+            }
+
+            buf_writer.write(&cypher_text)?;
+
+            ctr_index += 1;
+            offset += 16;
+        }
+        // write every 1MB
+        buf_writer.flush();
+
+        // if you know read_buffer_last.len then you know if last block size is different than 16
+        // you also know the exact last block size so take that special case into account
+
+        // 1MB is arbitrary, this should not be hardcoded and allow for diferent sizes
+        // should benchmark to find ideal size, python script?
+
+
+        // this should encrypt the entire file
+
+
+
+
+
+        ///////////////////////////////////////
         let read_range = match self.length % 16 {
             0 => self.length / 16,
             _ => self.length / 16 + 1,
