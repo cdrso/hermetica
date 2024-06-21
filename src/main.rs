@@ -10,7 +10,7 @@ fn main() {
     let input = PathBuf::from("/home/alejandro/acnDev/hermetica/test_files/correct_software.mp4");
     //input.set_file_name("file.txt");
 
-    let encrypted_file = PathBuf::from("/home/alejandro/acnDev/hermetica/test_files/video.hmtc");
+    let encrypted_file = PathBuf::from("/home/alejandro/acnDev/hermetica/test_files/correct_software.hmtc");
     //output.set_file_name("cypher.txt");
 
     let output = PathBuf::from("/home/alejandro/acnDev/hermetica/test_files/decypher.mp4");
