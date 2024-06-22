@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::usize;
 
 const MB: usize = 1 << 20;
+
 // Bufreader, one Buf for each thread, do benchmarking to chose buffer size for example 1MB
 // so for example 6 threads with 1MB buffer each, each thread computes its own tag fragment (xor is
 // commutative)
@@ -83,7 +84,7 @@ impl GcmEncrypt {
 
         self.cypher_text.write(&self.iv)?;
 
-        let mut tag: u128 = 0;
+        let mut tag = 0u128;
         let h = aes::encrypt_block(self.key_schedule, tag);
 
         let mut ctr_index: u32 = 0;
@@ -280,8 +281,8 @@ impl GcmDecrypt {
 
         self.tag = Some(tag);
 
-        //assert_eq!(self.tag, Some(*from_bytes(&tag_buffer)));
-        //println!("tag is correct");
+        assert_eq!(tag, *from_bytes(&tag_buffer));
+        println!("tag is correct");
         self.plain_text.flush()?;
 
         Ok(())
