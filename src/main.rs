@@ -7,13 +7,13 @@ fn main() {
 
     let key: u128 = 1;
 
-    let input = PathBuf::from("/home/alejandro/acnDev/hermetica/test_files/correct_software.mp4");
+    let input = PathBuf::from("/home/acn/Dev/hermetica/test_files/arch.iso");
     //input.set_file_name("file.txt");
 
-    let encrypted_file = PathBuf::from("/home/alejandro/acnDev/hermetica/test_files/correct_software.hmtc");
+    let encrypted_file = PathBuf::from("/home/acn/Dev/hermetica/test_files/arch.hmtc");
     //output.set_file_name("cypher.txt");
 
-    let output = PathBuf::from("/home/alejandro/acnDev/hermetica/test_files/decypher.mp4");
+    let output = PathBuf::from("/home/acn/Dev/hermetica/test_files/decypher.iso");
     //output.set_file_name("cypher.txt");
 
     //let encrypt = Encrypt::new(key, &input);

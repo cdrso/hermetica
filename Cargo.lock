@@ -3,6 +3,12 @@
 version = 3
 
 [[package]]
+name = "bytemuck"
+version = "1.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b236fc92302c97ed75b38da1f4917b5cdda4984745740f153a5d3059e48d725e"
+
+[[package]]
 name = "cc"
 version = "1.0.99"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -29,6 +35,7 @@ dependencies = [
 name = "hermetica"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "cc",
  "nasm-rs",
  "rand",

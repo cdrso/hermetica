@@ -10,6 +10,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::usize;
+use bytemuck;
 
 //const MB: usize = 1_048_576;
 
@@ -46,20 +47,20 @@ pub(crate) fn gf_mult(operand_a: [u8; 16], operand_b: [u8; 16]) -> [u8; 16] {
 pub struct GcmEncrypt {
     iv: [u8; 12],            // random (truly random) | owned
     key_schedule: [u32; 44], // gen from user key | ownded
-    plain_text: PathBuf,     // file path buf bufread bufwrite | not owned
+    plain_text: BufReader<File>,  //bufreader    // file path buf bufread bufwrite | not owned
     length: usize,
-    cypher_text: PathBuf,  // path buf | owned
+    cypher_text: BufWriter<File>, //bufwriter  // path buf | owned
     tag: Option<[u8; 16]>, //first 128 bits of encrypted file | owned
 }
 
 impl GcmEncrypt {
     pub fn new(
         key: u128,
-        plain_text: PathBuf,
-        cypher_text: PathBuf,
+        plain_text_path: PathBuf,
+        cypher_text_path: PathBuf,
     ) -> Result<GcmEncrypt, Box<dyn Error>> {
         //TODO
-        let length = fs::metadata(&plain_text)?.len() as usize;
+        let length = fs::metadata(&plain_text_path)?.len() as usize;
 
         // https://csrc.nist.gov/pubs/sp/800/38/d/final
         let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
@@ -67,6 +68,12 @@ impl GcmEncrypt {
         let tag = None;
 
         let key_schedule = aes::gen_encryption_key_schedule(key.to_ne_bytes());
+
+        let input_file = File::open(plain_text_path)?;
+        let mut plain_text = BufReader::new(input_file);
+
+        let output_file = fs::File::create(cypher_text_path)?;
+        let mut cypher_text = BufWriter::new(output_file);
 
         Ok(Self {
             iv,
@@ -78,15 +85,21 @@ impl GcmEncrypt {
         })
     }
 
+    fn process_buffer(self) {
+
+    }
+
     pub fn encrypt(mut self) -> Result<(), Box<dyn Error>> {
         println!("encrypting...");
+        /*
         let input_file = File::open(&self.plain_text)?;
         let mut buf_reader = BufReader::new(input_file);
 
         let output_file = fs::File::create(&self.cypher_text)?;
         let mut buf_writer = BufWriter::new(output_file);
+        */
 
-        buf_writer.write(&self.iv)?;
+        self.cypher_text.write(&self.iv)?;
 
         let mut tag: [u8; 16] = [0; 16];
         let h = aes::encrypt_block(self.key_schedule, tag);
@@ -110,7 +123,7 @@ impl GcmEncrypt {
         // need to keep offset
         for _ in 0..(bufread_cnt - 1) {
             offset = 0;
-            buf_reader.read_exact(&mut read_buffer)?;
+            self.plain_text.read_exact(&mut read_buffer)?;
             // el último del buffer debe ser de 16 bits siempre
             // define offset here? reseting makes sense
             for _ in 0..(MB.u64 / 16) {
@@ -131,13 +144,13 @@ impl GcmEncrypt {
                     tag[i] ^= mult_h[i];
                 }
 
-                buf_writer.write(&cypher_text)?;
+                self.cypher_text.write(&cypher_text)?;
 
                 ctr_index += 1;
                 offset += 16;
             }
             // write every 1MB
-            buf_writer.flush();
+            //buf_writer.flush();
         }
 
         let read_buffer_last_size = match self.length % MB.usize {
@@ -162,7 +175,7 @@ impl GcmEncrypt {
         //need to compute read_buffer and
         //number of 16 blocks in read_buffer + remainder
         //last
-        buf_reader.read_exact(&mut read_buffer_last)?;
+        self.plain_text.read_exact(&mut read_buffer_last)?;
         for _ in 0..(last_buf_blocks - 1) {
             let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
             let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
@@ -179,7 +192,7 @@ impl GcmEncrypt {
                 tag[i] ^= mult_h[i];
             }
 
-            buf_writer.write(&cypher_text)?;
+            self.cypher_text.write(&cypher_text)?;
 
             ctr_index += 1;
             offset += 16;
@@ -203,7 +216,7 @@ impl GcmEncrypt {
             tag[i] ^= mult_h[i];
         }
 
-        buf_writer.write(&cypher_text[0..last_buf_last_block_size])?;
+        self.cypher_text.write(&cypher_text[0..last_buf_last_block_size])?;
 
         //assert_eq!(offset + bytes_read, self.length.try_into()?);
 
@@ -221,87 +234,9 @@ impl GcmEncrypt {
 
         self.tag = Some(tag);
 
-        buf_writer.write(&self.tag.unwrap())?;
+        self.cypher_text.write(&self.tag.unwrap())?;
 
-        buf_writer.flush();
-
-        // if you know read_buffer_last.len then you know if last block size is different than 16
-        // you also know the exact last block size so take that special case into account
-
-        // 1MB is arbitrary, this should not be hardcoded and allow for diferent sizes
-        // should benchmark to find ideal size, python script?
-
-        // this should encrypt the entire file
-
-        ///////////////////////////////////////
-        /*
-        let read_range = match self.length % 16 {
-            0 => self.length / 16,
-            _ => self.length / 16 + 1,
-        };
-
-        for _ in 0..read_range - 1 {
-            reader.read_exact(&mut read_buffer)?;
-
-            let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
-            let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
-
-            let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
-            let mut cypher_text: [u8; 16] = [0; 16];
-
-            for i in 0..16 {
-                cypher_text[i] = encrypted_counter[i] ^ read_buffer[i];
-            }
-
-            let mult_h: [u8; 16] = gf_mult(h, cypher_text);
-            for i in 0..16 {
-                tag[i] ^= mult_h[i];
-            }
-
-            buf_writer.write(&cypher_text)?;
-
-            ctr_index += 1;
-            offset += 16;
-        }
-
-        let bytes_read = reader.read(&mut read_buffer)?;
-
-        let ctr_vec: Vec<u8> = self.iv.into_iter().chain(ctr_index.to_ne_bytes()).collect();
-        let ctr: [u8; 16] = ctr_vec.try_into().expect("heha");
-
-        let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
-        let mut cypher_text: [u8; 16] = [0; 16];
-
-        for i in 0..bytes_read {
-            cypher_text[i] = encrypted_counter[i] ^ read_buffer[i];
-        }
-
-        buf_writer.write(&cypher_text[0..bytes_read])?;
-
-        let mult_h: [u8; 16] = gf_mult(h, cypher_text);
-        for i in 0..16 {
-            tag[i] ^= mult_h[i];
-        }
-
-        assert_eq!(offset + bytes_read, self.length.try_into()?);
-
-        // add lenght to tag
-        for i in 0..16 {
-            tag[i] ^= u128::from(self.length).to_ne_bytes()[i];
-        }
-
-        // add iv || 0 to tag
-        let iv: Vec<u8> = self.iv.into_iter().chain([0, 0, 0, 0]).collect();
-        let mult_last: [u8; 16] = gf_mult(iv.try_into().expect("guarrada gorda"), h);
-        for i in 0..16 {
-            tag[i] ^= mult_last[i];
-        }
-
-        self.tag = Some(tag);
-
-        buf_writer.write(&self.tag.unwrap())?;
-        buf_writer.flush()?;
-        */
+        self.cypher_text.flush();
 
         Ok(())
     }
@@ -310,20 +245,26 @@ impl GcmEncrypt {
 pub struct GcmDecrypt {
     iv: Option<[u8; 12]>,    // random (truly random) | not owned?
     key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
-    cypher_text: PathBuf,    //file | not owned
+    cypher_text: BufReader<File>,    //file | not owned
     length: u64,
-    plain_text: PathBuf,   // | owned
+    plain_text: BufWriter<File>,   // | owned
     tag: Option<[u8; 16]>, //first 128 bits of encrypted file // | not owned
 }
 
 impl GcmDecrypt {
     pub fn new(
         key: u128,
-        cypher_text: PathBuf,
-        plain_text: PathBuf,
+        cypher_text_path: PathBuf,
+        plain_text_path: PathBuf,
     ) -> Result<GcmDecrypt, Box<dyn Error>> {
-        let length = fs::metadata(&cypher_text)?.len() - 28; //12 bytes IV 16 bytes tag
+        let length = fs::metadata(&cypher_text_path)?.len() - 28; //12 bytes IV 16 bytes tag
         let key_schedule = aes::gen_encryption_key_schedule(key.to_ne_bytes());
+
+        let input_file = File::open(&cypher_text_path)?;
+        let mut cypher_text = BufReader::new(input_file);
+
+        let output_file = fs::File::create(&plain_text_path)?;
+        let mut plain_text = BufWriter::new(output_file);
 
         Ok(Self {
             iv: None,
@@ -337,11 +278,6 @@ impl GcmDecrypt {
 
     pub fn decrypt(mut self) -> Result<(), Box<dyn Error>> {
         println!("decrypting...");
-        let input_file = File::open(&self.cypher_text)?;
-        let mut reader = BufReader::new(input_file);
-
-        let output_file = fs::File::create(&self.plain_text)?;
-        let mut buf_writer = BufWriter::new(output_file);
 
         let mut offset = 0;
         let mut ctr_index: u32 = 1;
@@ -349,7 +285,7 @@ impl GcmDecrypt {
         let mut cypher_buffer: [u8; 16] = [0; 16];
         let mut tag_buffer: [u8; 16] = [0; 16];
 
-        reader.read_exact(&mut iv_buffer)?;
+        self.cypher_text.read_exact(&mut iv_buffer)?;
         self.iv = Some(iv_buffer);
 
         let mut tag: [u8; 16] = [0; 16];
@@ -362,7 +298,7 @@ impl GcmDecrypt {
         };
 
         for _ in 0..(read_range - 1) {
-            reader.read_exact(&mut cypher_buffer)?;
+            self.cypher_text.read_exact(&mut cypher_buffer)?;
 
             let ctr_vec: Vec<u8> = self
                 .iv
@@ -384,7 +320,7 @@ impl GcmDecrypt {
                 tag[i] ^= mult_h[i];
             }
 
-            buf_writer.write(&plain_text)?;
+            self.plain_text.write(&plain_text)?;
 
             ctr_index += 1;
             offset += 16;
@@ -395,7 +331,7 @@ impl GcmDecrypt {
             _ => vec![0; remainder.try_into()?],
         };
 
-        reader.read_exact(&mut last_cypher_buffer)?;
+        self.cypher_text.read_exact(&mut last_cypher_buffer)?;
 
         let ctr_vec: Vec<u8> = self
             .iv
@@ -420,7 +356,7 @@ impl GcmDecrypt {
             tag[i] ^= mult_h[i];
         }
 
-        buf_writer.write(&plain_text[0..last_cypher_buffer.len()])?;
+        self.plain_text.write(&plain_text[0..last_cypher_buffer.len()])?;
         assert_eq!(offset + last_cypher_buffer.len(), self.length.try_into()?);
         println!("lenght is correct");
 
@@ -435,13 +371,13 @@ impl GcmDecrypt {
             tag[i] ^= mult_last[i];
         }
 
-        reader.read_exact(&mut tag_buffer)?;
+        self.cypher_text.read_exact(&mut tag_buffer)?;
 
         self.tag = Some(tag_buffer);
 
         assert_eq!(self.tag, Some(tag));
         println!("tag is correct");
-        buf_writer.flush()?;
+        self.plain_text.flush()?;
 
         Ok(())
     }

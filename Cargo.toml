@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 rand = "0.8.5"
+bytemuck = "=1.16.1"
 
 [build-dependencies]
 nasm-rs = "0.3.0"
