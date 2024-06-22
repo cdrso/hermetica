@@ -1,7 +1,6 @@
 pub mod clmul;
 use crate::aes;
-use bytemuck::checked::from_bytes;
-use bytemuck::{bytes_of, bytes_of_mut};
+use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
 use rand::Rng;
 use std::error::Error;
 use std::fs;
@@ -107,7 +106,7 @@ impl GcmEncrypt {
             let mut offset = 0;
 
             let buffer_size = if block_cnt == bufread_cnt - 1 {
-                let remaining = self.length - block_cnt * 16;
+                let remaining = self.length - block_cnt * MB;
                 let mut last_buffer = vec![0u8; remaining];
                 self.plain_text.read_exact(&mut last_buffer)?;
                 read_buffer[..remaining].copy_from_slice(&last_buffer);
@@ -120,7 +119,7 @@ impl GcmEncrypt {
 
             let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
 
-            for _ in 0..buf_blocks {
+            for i in 0..buf_blocks {
                 ctr_arr[12..].copy_from_slice(&bytes_of(&ctr_index)); // copy counter bytes into the array
 
                 let encrypted_counter =
@@ -132,12 +131,21 @@ impl GcmEncrypt {
                     buffer_size - offset
                 };
 
-                let cypher_text: u128 =
-                    encrypted_counter ^ from_bytes(&read_buffer[offset..offset + block_size]);
+                let cypher_text: u128;
+                if i == buf_blocks - 1 {
+                    // Last iteration logic
+                    let mut block = [0u8; 16]; // Create a temporary array with 16 bytes
+                    block[..block_size].copy_from_slice(&read_buffer[offset..offset + block_size]);
+                    cypher_text =
+                        encrypted_counter ^ from_bytes(&block);
+                } else {
+                    // Normal iteration logic
+                    cypher_text =
+                        encrypted_counter ^ from_bytes(&read_buffer[offset..offset + block_size]);
+                }
 
                 tag ^= gf_mult(h, cypher_text);
-
-                self.cypher_text.write(bytes_of(&cypher_text)).unwrap();
+                self.cypher_text.write(&bytes_of(&cypher_text)[0..block_size]).unwrap();
 
                 ctr_index += 1;
                 offset += block_size;
@@ -160,7 +168,7 @@ pub struct GcmDecrypt {
     iv: Option<[u8; 12]>,         // random (truly random) | not owned?
     key_schedule: [u32; 44],      //gen from key, no need for key_schedule_decrypt | owned
     cypher_text: BufReader<File>, //file | not owned
-    length: u64,
+    length: usize,
     plain_text: BufWriter<File>, // | owned
     tag: Option<u128>,           //first 128 bits of encrypted file // | not owned
 }
@@ -171,14 +179,14 @@ impl GcmDecrypt {
         cypher_text_path: PathBuf,
         plain_text_path: PathBuf,
     ) -> Result<GcmDecrypt, Box<dyn Error>> {
-        let length = fs::metadata(&cypher_text_path)?.len() - 28; //12 bytes IV 16 bytes tag
+        let length = (fs::metadata(&cypher_text_path)?.len() - 28) as usize; //12 bytes IV 16 bytes tag
         let key_schedule = aes::gen_encryption_key_schedule(key);
 
         let input_file = File::open(&cypher_text_path)?;
-        let mut cypher_text = BufReader::new(input_file);
+        let cypher_text = BufReader::new(input_file);
 
         let output_file = fs::File::create(&plain_text_path)?;
-        let mut plain_text = BufWriter::new(output_file);
+        let plain_text = BufWriter::new(output_file);
 
         Ok(Self {
             iv: None,
@@ -193,10 +201,7 @@ impl GcmDecrypt {
     pub fn decrypt(mut self) -> Result<(), Box<dyn Error>> {
         println!("decrypting...");
 
-        let mut offset = 0;
-        let mut ctr_index: u32 = 1;
         let mut iv_buffer: [u8; 12] = [0; 12];
-        let mut cypher_buffer: [u8; 16] = [0; 16];
         let mut tag_buffer: [u8; 16] = [0; 16];
 
         self.cypher_text.read_exact(&mut iv_buffer)?;
@@ -205,79 +210,78 @@ impl GcmDecrypt {
         let mut tag = 0u128;
         let h = aes::encrypt_block(self.key_schedule, tag);
 
-        let remainder = self.length % 16;
-        let read_range = match remainder {
-            0 => self.length / 16,
-            _ => self.length / 16 + 1,
-        };
+        let mut ctr_index: u32 = 0;
 
-        for _ in 0..(read_range - 1) {
-            self.cypher_text.read_exact(&mut cypher_buffer)?;
+        let mut read_buffer: [u8; MB] = [0; MB];
 
-            let mut ctr_arr = [0u8; 16]; // create a fixed-size array with 16 bytes
-            ctr_arr[..12].copy_from_slice(&self.iv.unwrap()); // copy IV bytes into the array
-            ctr_arr[12..].copy_from_slice(&bytes_of(&ctr_index)); // copy counter bytes into the array
-            let ctr: u128 = *(from_bytes(&ctr_arr));
-
-            let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
-
-            let plain_text: u128 = encrypted_counter ^ from_bytes(&cypher_buffer);
-
-            tag ^= gf_mult(h, *from_bytes(&cypher_buffer));
-
-            self.plain_text.write(&bytes_of(&plain_text))?;
-
-            ctr_index += 1;
-            offset += 16;
-        }
-
-        let mut last_cypher_buffer = match remainder {
-            0 => vec![0; 16],
-            _ => vec![0; remainder.try_into()?],
-        };
-
-        self.cypher_text.read_exact(&mut last_cypher_buffer)?;
+        let bufread_cnt = (self.length + MB - 1) / MB;
 
         let mut ctr_arr = [0u8; 16]; // create a fixed-size array with 16 bytes
         ctr_arr[..12].copy_from_slice(&self.iv.unwrap()); // copy IV bytes into the array
         ctr_arr[12..].copy_from_slice(&bytes_of(&ctr_index)); // copy counter bytes into the array
-        let ctr: u128 = *(from_bytes(&ctr_arr));
 
-        let encrypted_counter = aes::encrypt_block(self.key_schedule, ctr);
+        // add iv to tag
+        tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
+        ctr_index += 1;
 
-        let plain_text: u128 =
-            encrypted_counter ^ from_bytes(&cypher_buffer[0..last_cypher_buffer.len()]);
+        for block_cnt in 0..(bufread_cnt) {
+            let mut offset = 0;
 
-        tag ^= gf_mult(h, *from_bytes(&last_cypher_buffer));
+            let buffer_size = if block_cnt == bufread_cnt - 1 {
+                let remaining = self.length - block_cnt * MB;
+                let mut last_buffer = vec![0u8; remaining];
+                self.cypher_text.read_exact(&mut last_buffer);
+                read_buffer[..remaining].copy_from_slice(&last_buffer);
+                remaining
+            } else {
+                // This is a full buffer; read 1MB of data
+                self.cypher_text.read_exact(&mut read_buffer)?;
+                MB
+            };
 
-        self.plain_text
-            .write(&bytes_of(&plain_text)[0..last_cypher_buffer.len()])?;
+            let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
 
-        assert_eq!(offset + last_cypher_buffer.len(), self.length.try_into()?);
-        println!("lenght is correct");
+            for i in 0..buf_blocks {
+                ctr_arr[12..].copy_from_slice(&bytes_of(&ctr_index)); // copy counter bytes into the array
 
-        // add lenght to tag
-        tag ^= self.length as u128;
-        /*
-        for i in 0..16 {
-            tag[i] ^= u128::from(self.length as u64).to_ne_bytes()[i];
+                let encrypted_counter =
+                    aes::encrypt_block(self.key_schedule, *(from_bytes(&ctr_arr)));
+
+                let block_size = if offset + 16 <= buffer_size {
+                    16
+                } else {
+                    buffer_size - offset
+                };
+
+                let plain_text: u128;
+                if i == buf_blocks - 1 {
+                    // Last iteration logic
+                    let mut block = [0u8; 16]; // Create a temporary array with 16 bytes
+                    block[..block_size].copy_from_slice(&read_buffer[offset..offset + block_size]);
+                    plain_text =
+                        encrypted_counter ^ from_bytes(&block);
+                    tag ^= gf_mult(h, *from_bytes(&block));
+                } else {
+                    // Normal iteration logic
+                    plain_text =
+                        encrypted_counter ^ from_bytes(&read_buffer[offset..offset + block_size]);
+                    tag ^= gf_mult(h, *from_bytes(&read_buffer[offset..offset + block_size]));
+                }
+                    self.plain_text.write(&bytes_of(&plain_text)[0..block_size]).unwrap();
+
+                ctr_index += 1;
+                offset += block_size;
+            }
         }
-        */
 
-        // add iv || 0 to tag
-        let mut iv_arr = [0u8; 16]; // create a fixed-size array with 16 bytes
-        iv_arr[..12].copy_from_slice(&self.iv.unwrap()); // copy IV bytes into the array
-        iv_arr[12..].copy_from_slice(&bytes_of(&0u32)); // copy counter bytes into the array
-        let iv: u128 = *(from_bytes(&iv_arr));
-
-        tag ^= gf_mult(iv, h);
+        tag ^= self.length as u128;
 
         self.cypher_text.read_exact(&mut tag_buffer)?;
 
         self.tag = Some(tag);
 
-        assert_eq!(self.tag, Some(tag));
-        println!("tag is correct");
+        //assert_eq!(self.tag, Some(*from_bytes(&tag_buffer)));
+        //println!("tag is correct");
         self.plain_text.flush()?;
 
         Ok(())
