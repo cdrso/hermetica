@@ -36,6 +36,7 @@ pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
     product
 }
 
+// last block is not 128 bits but the size of the plain text, discard the rest
 
 pub struct GcmEncrypt {
     iv: [u8; 12],                // random (truly random) | owned
