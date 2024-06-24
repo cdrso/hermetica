@@ -105,6 +105,7 @@ impl GcmInstance {
 
         // each bufread read will be 1MB
         let mut read_buffer: [u8; MB] = [0; MB];
+        let mut write_buffer: [u8; MB] = [0; MB];
 
         // how many 1MB reads are necesary for the entire file
         let bufread_cnt = (length + MB - 1) / MB;
@@ -117,14 +118,16 @@ impl GcmInstance {
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
         ctr_index += 1;
 
+        // To be parallelized
+        // thread 1 buffer 0
         for buffer_index in 0..(bufread_cnt) {
             let mut offset = 0;
 
             let buffer_size = if buffer_index == bufread_cnt - 1 {
                 let remaining = length - buffer_index * MB;
-                let mut last_buffer = vec![0u8; remaining];
-                plain_text_buf.read_exact(&mut last_buffer)?;
-                read_buffer[..remaining].copy_from_slice(&last_buffer);
+                let mut last_read_buffer = vec![0u8; remaining];
+                plain_text_buf.read_exact(&mut last_read_buffer)?;
+                read_buffer[..remaining].copy_from_slice(&last_read_buffer);
                 remaining
             } else {
                 // This is a full buffer; read 1MB of data
@@ -157,13 +160,16 @@ impl GcmInstance {
                 };
 
                 tag ^= gf_mult(h, cypher_text);
-                cypher_text_buf
-                    // swapping the unwrap to ? panics
-                    .write_all(&bytes_of(&cypher_text)[0..block_size])
-                    .unwrap();
+
+                write_buffer[offset..offset+block_size].copy_from_slice(&bytes_of(&cypher_text)[0..block_size]);
+
                 ctr_index += 1;
                 offset += block_size;
             }
+
+            cypher_text_buf
+                .write_all(&write_buffer[0..offset])
+                .unwrap();
         }
 
         tag ^= length as u128;
@@ -204,6 +210,7 @@ impl GcmInstance {
         let mut ctr_index: u32 = 0;
 
         let mut read_buffer: [u8; MB] = [0; MB];
+        let mut write_buffer: [u8; MB] = [0; MB];
 
         let bufread_cnt = (length + MB - 1) / MB;
 
@@ -258,13 +265,15 @@ impl GcmInstance {
                     encrypted_counter ^ from_bytes(&read_buffer[offset..offset + block_size])
                 };
 
-                tmp_buf
-                    // swapping the unwrap to ? panics
-                    .write_all(&bytes_of(&plain_text)[0..block_size])
-                    .unwrap();
+                write_buffer[offset..offset+block_size].copy_from_slice(&bytes_of(&plain_text)[0..block_size]);
+
                 ctr_index += 1;
                 offset += block_size;
             }
+
+            tmp_buf
+                .write_all(&write_buffer[0..offset])
+                .unwrap();
         }
 
         tag ^= length as u128;
