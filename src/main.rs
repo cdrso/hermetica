@@ -50,17 +50,17 @@ fn main() {
             let mut os_string: OsString = path.into();
             os_string.push(".hmtc");
             let output: PathBuf = os_string.into();
-            let encrypt = aes::gcm::GcmEncrypt::new(key, args.path, output)
+            let gcm = aes::gcm::Gcm::new(key, args.path, output)
                 .expect("input file does not exist");
-            let _ = encrypt.encrypt();
+            let _ = gcm.encrypt();
         }
         Mode::Decrypt => {
             println!("Decrypting file: {:?}", args.path);
             let mut output = args.path.clone();
             output.set_extension("");
-            let decrypt = aes::gcm::GcmDecrypt::new(key, args.path, output)
+            let gcm = aes::gcm::Gcm::new(key, args.path, output)
                 .expect("input file does not exist");
-            let _ = decrypt.decrypt();
+            let _ = gcm.decrypt();
         }
     }
 }
