@@ -1,9 +1,12 @@
 mod aes;
 
+use aes::gcm::{GcmInstance, GcmError};
 use clap::{Parser, ValueEnum};
+use rpassword::read_password;
 use std::env;
-use std::ffi::OsString;
 use std::path::PathBuf;
+use std::ffi::OsString;
+use std::process::exit;
 
 #[derive(Parser)]
 struct CommandLineArgs {
@@ -26,9 +29,17 @@ fn main() {
     let args = CommandLineArgs::parse();
 
     println!("Insert Key");
-    let key_input = rpassword::read_password().unwrap();
+    let key_input_1 = read_password().expect("Failed to read password");
 
-    let key_bytes = key_input.as_bytes();
+    println!("Confirm Key");
+    let key_input_2 = read_password().expect("Failed to read password");
+
+    if key_input_1 != key_input_2 {
+        println!("Key inputs do not match, aborting");
+        exit(1);
+    }
+
+    let key_bytes = key_input_1.as_bytes();
     let key_len = key_bytes.len();
     let sliced_key_bytes = if key_len > 16 {
         &key_bytes[0..16]
@@ -37,30 +48,50 @@ fn main() {
     };
 
     let mut key_bytes_array = [0u8; 16];
+    key_bytes_array[..sliced_key_bytes.len()].copy_from_slice(sliced_key_bytes);
 
-    key_bytes_array[0..sliced_key_bytes.len()].copy_from_slice(&sliced_key_bytes);
-
-    // Convert the key_bytes_array to u128
     let key = u128::from_ne_bytes(key_bytes_array);
 
     match args.op {
-        Mode::Encrypt => {
-            println!("Encrypting file: {:?}", args.path);
-            let path = args.path.clone();
-            let mut os_string: OsString = path.into();
-            os_string.push(".hmtc");
-            let output: PathBuf = os_string.into();
-            let gcm = aes::gcm::Gcm::new(key, args.path, output)
-                .expect("input file does not exist");
-            let _ = gcm.encrypt();
-        }
-        Mode::Decrypt => {
-            println!("Decrypting file: {:?}", args.path);
-            let mut output = args.path.clone();
-            output.set_extension("");
-            let gcm = aes::gcm::Gcm::new(key, args.path, output)
-                .expect("input file does not exist");
-            let _ = gcm.decrypt();
-        }
+        Mode::Encrypt => handle_encryption(key, &args.path),
+        Mode::Decrypt => handle_decryption(key, &args.path),
+    }
+}
+
+fn handle_encryption(key: u128, input_path: &PathBuf) {
+    let output_path = input_path.clone();
+    let mut os_string: OsString = output_path.into();
+    os_string.push(".hmtc");
+    let output_path: PathBuf = os_string.into();
+
+    let gcm = GcmInstance::new(key, input_path.clone(), output_path.clone());
+    if let Err(err) = gcm.encrypt() {
+        handle_gcm_error(*err);
+    } else {
+        println!("Encryption successful! Encrypted file: {:?}", output_path);
+    }
+}
+
+fn handle_decryption(key: u128, input_path: &PathBuf) {
+    let mut output_path = input_path.clone();
+    output_path.set_extension(""); // Removes extension
+
+    let gcm = GcmInstance::new(key, output_path.clone(), input_path.clone());
+    if let Err(err) = gcm.decrypt() {
+        handle_gcm_error(*err);
+    } else {
+        println!("Decryption successful! Decrypted file: {:?}", output_path);
+    }
+}
+
+fn handle_gcm_error(err: GcmError) {
+    match err {
+        GcmError::TagMismatch => {
+            eprintln!("Tag mismatch error");
+            eprintln!("The file may have been tampered with or the key is incorrect");
+        },
+        GcmError::IoError(io_err) => {
+            eprintln!("IO error: {}", io_err);
+        },
     }
 }

@@ -4,6 +4,7 @@ use crate::aes;
 use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
 use rand::Rng;
 use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -33,34 +34,53 @@ pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
     product
 }
 
-pub struct Gcm {
-    iv: Option<[u8; 12]>,         // random (truly random) | not owned?
-    key_schedule: [u32; 44],      //gen from key, no need for key_schedule_decrypt | owned
-    tag: Option<u128>,           //first 128 bits of encrypted file // | not owned
+pub struct GcmInstance {
+    iv: Option<[u8; 12]>,    // random (truly random) | not owned?
+    key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
+    tag: Option<u128>,       //first 128 bits of encrypted file // | not owned
     length: Option<usize>,
     cypher_text: PathBuf, //file | not owned
-    plain_text: PathBuf, // | owned
+    plain_text: PathBuf,  // | owned
 }
 
-impl Gcm {
-    pub fn new(
-        key: u128,
-        cypher_text: PathBuf,
-        plain_text: PathBuf,
-    ) -> Result<Gcm, Box<dyn Error>> {
+#[derive(Debug)]
+pub enum GcmError {
+    IoError(std::io::Error),
+    TagMismatch,
+}
+
+impl std::fmt::Display for GcmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            GcmError::IoError(ref err) => write!(f, "IO error: {}", err),
+            GcmError::TagMismatch => write!(f, "Tag mismatch during decryption"),
+        }
+    }
+}
+
+impl From<std::io::Error> for Box<GcmError> {
+    fn from(err: std::io::Error) -> Self {
+        Box::new(GcmError::IoError(err))
+    }
+}
+
+impl Error for GcmError {}
+
+impl GcmInstance {
+    pub fn new(key: u128, plain_text: PathBuf, cypher_text: PathBuf) -> Self {
         let key_schedule = aes::gen_encryption_key_schedule(key);
 
-        Ok(Self {
+        Self {
             iv: None,
             key_schedule,
             tag: None,
             length: None,
             plain_text,
             cypher_text,
-        })
+        }
     }
 
-    pub fn encrypt(mut self) -> Result<(), Box<dyn Error>> {
+    pub fn encrypt(mut self) -> Result<(), Box<GcmError>> {
         let length = fs::metadata(&self.plain_text)?.len() as usize;
         self.length = Some(length);
 
@@ -157,10 +177,9 @@ impl Gcm {
         Ok(())
     }
 
-    pub fn decrypt(mut self) -> Result<(), Box<dyn Error>> {
-        println!("decrypting...");
-
+    pub fn decrypt(mut self) -> Result<(), Box<GcmError>> {
         let length = (fs::metadata(&self.cypher_text)?.len() - 28) as usize; //12 bytes IV 16 bytes tag
+        self.length = Some(length);
 
         let input_file = File::open(&self.cypher_text)?;
         let mut cypher_text_buf = BufReader::new(&input_file);
@@ -173,6 +192,8 @@ impl Gcm {
 
         let mut iv_buffer: [u8; 12] = [0; 12];
         let mut tag_buffer: [u8; 16] = [0; 16];
+
+        println!("decrypting...");
 
         cypher_text_buf.read_exact(&mut iv_buffer)?;
         self.iv = Some(iv_buffer);
@@ -237,7 +258,7 @@ impl Gcm {
                     encrypted_counter ^ from_bytes(&read_buffer[offset..offset + block_size])
                 };
 
-               tmp_buf
+                tmp_buf
                     // swapping the unwrap to ? panics
                     .write_all(&bytes_of(&plain_text)[0..block_size])
                     .unwrap();
@@ -253,15 +274,10 @@ impl Gcm {
         self.tag = Some(tag);
 
         if tag != u128::from_ne_bytes(tag_buffer) {
-            // delete file
-            // tmp file and if tag matches then move into the original file
-            // if not delete
             fs::remove_file(tmp)?;
-            return Err("tag mismatch".into())
+            return Err(Box::new(GcmError::TagMismatch));
         }
 
-        // is this a good aproach?
-        // delete the file and rename?
         tmp_buf.flush()?;
         fs::remove_file(&self.plain_text)?;
         fs::rename(&tmp, &self.plain_text)?;
