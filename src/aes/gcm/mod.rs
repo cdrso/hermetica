@@ -142,9 +142,9 @@ impl GcmEncrypt {
 
                 tag ^= gf_mult(h, cypher_text);
                 self.cypher_text
+                    // swapping the unwrap to ? panics
                     .write_all(&bytes_of(&cypher_text)[0..block_size])
                     .unwrap();
-
                 ctr_index += 1;
                 offset += block_size;
             }
@@ -183,13 +183,16 @@ impl GcmDecrypt {
         let input_file = File::open(&cypher_text_path)?;
         let cypher_text = BufReader::new(input_file);
 
-        let output_file = fs::File::create(plain_text_path)?;
-        let plain_text = BufWriter::new(output_file);
+        let mut tmp = plain_text_path.clone();
+        tmp.set_file_name("tmp_dec");
+
+        let output_file = fs::File::create(tmp)?;
+        let plain_text_tmp = BufWriter::new(output_file);
 
         Ok(Self {
             iv: None,
             key_schedule,
-            plain_text,
+            plain_text: plain_text_tmp,
             length,
             cypher_text,
             tag: None,
@@ -266,9 +269,9 @@ impl GcmDecrypt {
                 };
 
                 self.plain_text
+                    // swapping the unwrap to ? panics
                     .write_all(&bytes_of(&plain_text)[0..block_size])
                     .unwrap();
-
                 ctr_index += 1;
                 offset += block_size;
             }
@@ -280,8 +283,18 @@ impl GcmDecrypt {
 
         self.tag = Some(tag);
 
-        assert_eq!(tag, u128::from_ne_bytes(tag_buffer));
+        if tag != u128::from_ne_bytes(tag_buffer) {
+            // delete file
+            // tmp file and if tag matches then move into the original file
+            // if not delete
+            fs::remove_file("tmp_dec")?;
+            return Err("tag mismatch".into())
+        }
 
+        // is this a good aproach?
+        // delete the file and rename?
+        fs::remove_file("video.mp4")?;
+        fs::rename("tmp_dec", "video.mp4")?;
         self.plain_text.flush()?;
 
         Ok(())

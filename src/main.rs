@@ -1,30 +1,66 @@
 mod aes;
+
+use clap::{Parser, ValueEnum};
 use std::env;
+use std::ffi::OsString;
 use std::path::PathBuf;
+
+#[derive(Parser)]
+struct CommandLineArgs {
+    #[arg(value_enum)]
+    op: Mode,
+    path: PathBuf,
+}
+
+#[derive(ValueEnum, Clone)]
+enum Mode {
+    #[value(alias = "-enc", alias = "--encrypt")]
+    Encrypt,
+    #[value(alias = "-dec", alias = "--decrypt")]
+    Decrypt,
+}
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
 
-    let key: u128 = 1;
+    let args = CommandLineArgs::parse();
 
-    let input = PathBuf::from("/home/acn/Dev/hermetica/test_files/video.mp4");
-    //input.set_file_name("file.txt");
+    println!("Insert Key");
+    let key_input = rpassword::read_password().unwrap();
 
-    let encrypted_file = PathBuf::from("/home/acn/Dev/hermetica/test_files/video.hmtc");
-    //output.set_file_name("cypher.txt");
+    let key_bytes = key_input.as_bytes();
+    let key_len = key_bytes.len();
+    let sliced_key_bytes = if key_len > 16 {
+        &key_bytes[0..16]
+    } else {
+        key_bytes
+    };
 
-    let output = PathBuf::from("/home/acn/Dev/hermetica/test_files/decypher.mp4");
-    //output.set_file_name("cypher.txt");
+    let mut key_bytes_array = [0u8; 16];
 
-    //let encrypt = Encrypt::new(key, &input);
-    //encrypt.run(&output);
+    key_bytes_array[0..sliced_key_bytes.len()].copy_from_slice(&sliced_key_bytes);
 
-    let encrypt_gcm = aes::gcm::GcmEncrypt::new(key, input, encrypted_file.clone()).expect("hehe");
-    let _ = encrypt_gcm.encrypt();
+    // Convert the key_bytes_array to u128
+    let key = u128::from_ne_bytes(key_bytes_array);
 
-    let decrypt_gcm = aes::gcm::GcmDecrypt::new(key, encrypted_file, output).expect("huha");
-    let _ = decrypt_gcm.decrypt();
-
-    //let decrypt = Decrypt::new(key, &output);
-    //decrypt.run(&decrypted_output);
+    match args.op {
+        Mode::Encrypt => {
+            println!("Encrypting file: {:?}", args.path);
+            let path = args.path.clone();
+            let mut os_string: OsString = path.into();
+            os_string.push(".hmtc");
+            let output: PathBuf = os_string.into();
+            let encrypt = aes::gcm::GcmEncrypt::new(key, args.path, output)
+                .expect("input file does not exist");
+            let _ = encrypt.encrypt();
+        }
+        Mode::Decrypt => {
+            println!("Decrypting file: {:?}", args.path);
+            let mut output = args.path.clone();
+            output.set_extension("");
+            let decrypt = aes::gcm::GcmDecrypt::new(key, args.path, output)
+                .expect("input file does not exist");
+            let _ = decrypt.decrypt();
+        }
+    }
 }
