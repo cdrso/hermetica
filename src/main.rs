@@ -1,6 +1,6 @@
 mod aes;
 
-use aes::gcm::{GcmInstance, GcmError};
+use aes::gcm::{EncryptorInstance, DecryptorInstance, GcmError};
 use clap::{Parser, ValueEnum};
 use rpassword::read_password;
 use std::env;
@@ -64,7 +64,7 @@ fn handle_encryption(key: u128, input_path: &PathBuf) {
     os_string.push(".hmtc");
     let output_path: PathBuf = os_string.into();
 
-    let gcm = GcmInstance::new(key, input_path.clone(), output_path.clone());
+    let mut gcm = EncryptorInstance::new(key, input_path.clone(), output_path.clone()).expect("test");
     if let Err(err) = gcm.encrypt() {
         handle_gcm_error(*err);
     } else {
@@ -76,7 +76,7 @@ fn handle_decryption(key: u128, input_path: &PathBuf) {
     let mut output_path = input_path.clone();
     output_path.set_extension(""); // Removes extension
 
-    let gcm = GcmInstance::new(key, output_path.clone(), input_path.clone());
+    let mut gcm = DecryptorInstance::new(key, output_path.clone(), input_path.clone()).expect("test");
     if let Err(err) = gcm.decrypt() {
         handle_gcm_error(*err);
     } else {
