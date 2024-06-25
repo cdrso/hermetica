@@ -58,8 +58,8 @@ struct GcmContext {
     ctr_arr: [u8; 16],
     gcm_h: u128,
     computed_tag: u128,
-    intermediate_read_buffer: [u8; MB],
-    intermediate_write_buffer: [u8; MB],
+    intermediate_read_buffer: Vec<u8>,
+    intermediate_write_buffer: Vec<u8>,
     intermediate_buffer_cnt: usize
 }
 
@@ -99,8 +99,8 @@ impl EncryptorInstance {
         let output_file = fs::File::create(&cypher_text_path)?;
         let mut cypher_text = BufWriter::new(output_file);
 
-        let intermediate_read_buffer: [u8; MB] = [0; MB];
-        let intermediate_write_buffer: [u8; MB] = [0; MB];
+        let intermediate_read_buffer = vec![0u8; MB];
+        let intermediate_write_buffer = vec![0u8; MB];
         let intermediate_buffer_cnt = (length + MB - 1) / MB;
 
         let mut computed_tag = 0u128;
@@ -165,9 +165,10 @@ impl EncryptorInstance {
                     buffer_size - offset
                 };
 
-                let cypher_text: u128 = if i == buf_blocks - 1 {
+                let cypher_text: u128 = if i == buf_blocks - 1 && buffer_index == self.context.intermediate_buffer_cnt - 1 {
                     // Last iteration logic
-                    let mut block = [0u8; 16]; // Create a temporary array with 16 bytes
+                    // cant use static array because it gives alignment error
+                    let mut block = vec![0u8; 16]; // Create a temporary with 16 bytes
                     block[..block_size].copy_from_slice(&self.context.intermediate_read_buffer[offset..offset + block_size]);
                     encrypted_counter ^ from_bytes(&block)
                 } else {
@@ -220,8 +221,8 @@ impl DecryptorInstance {
 
         cypher_text.read_exact(&mut iv)?;
 
-        let intermediate_read_buffer: [u8; MB] = [0; MB];
-        let intermediate_write_buffer: [u8; MB] = [0; MB];
+        let intermediate_read_buffer = vec![0u8; MB];
+        let intermediate_write_buffer = vec![0u8; MB];
         let intermediate_buffer_cnt = (length + MB - 1) / MB;
 
         let mut computed_tag = 0u128;
@@ -232,7 +233,7 @@ impl DecryptorInstance {
         ctr_arr[..12].copy_from_slice(&iv); // copy IV bytes into the array
         ctr_arr[12..].copy_from_slice(bytes_of(&ctr)); // copy counter bytes into the array
 
-        let tag_position = length as u64 - 16;
+        let tag_position = length as u64 + 12; // cyphertext + IV offset
         cypher_text.seek(std::io::SeekFrom::Start(tag_position))?;
         cypher_text.read_exact(&mut tag)?;
         let tag = u128::from_ne_bytes(tag);
@@ -292,9 +293,10 @@ impl DecryptorInstance {
                     buffer_size - offset
                 };
 
-                let plain_text: u128 = if i == buf_blocks - 1 {
+                let plain_text: u128 = if i == buf_blocks - 1 && buffer_index == self.context.intermediate_buffer_cnt - 1 {
                     // Last iteration logic
-                    let mut block = encrypted_counter.to_ne_bytes(); // Create a temporary array with 16 bytes
+                    // cant use static array because it gives alignment error
+                    let mut block = encrypted_counter.to_ne_bytes().to_vec(); // Create a temporary array with 16 bytes
                     block[..block_size].copy_from_slice(&self.context.intermediate_read_buffer[offset..offset + block_size]);
                     self.context.computed_tag ^= gf_mult(self.context.gcm_h, *from_bytes(&block));
 
@@ -332,7 +334,6 @@ impl DecryptorInstance {
 
     }
 }
-
 
 pub trait GcmOps {
 }
