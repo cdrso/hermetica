@@ -1,11 +1,11 @@
 mod aes;
 
-use aes::gcm::{EncryptorInstance, DecryptorInstance, GcmError};
+use aes::gcm::{DecryptorInstance, EncryptorInstance, GcmError};
 use clap::{Parser, ValueEnum};
 use rpassword::read_password;
 use std::env;
-use std::path::PathBuf;
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::exit;
 
 #[derive(Parser)]
@@ -28,6 +28,8 @@ fn main() {
 
     let args = CommandLineArgs::parse();
 
+    // Parse dont validate!
+    // struct key(u128)
     println!("Insert Key");
     let key_input_1 = read_password().expect("Failed to read password");
 
@@ -64,7 +66,8 @@ fn handle_encryption(key: u128, input_path: &PathBuf) {
     os_string.push(".hmtc");
     let output_path: PathBuf = os_string.into();
 
-    let mut gcm = EncryptorInstance::new(key, input_path.clone(), output_path.clone()).expect("test");
+    let mut gcm =
+        EncryptorInstance::new(key, input_path.clone(), output_path.clone()).expect("test");
     if let Err(err) = gcm.encrypt() {
         handle_gcm_error(*err);
     } else {
@@ -76,7 +79,8 @@ fn handle_decryption(key: u128, input_path: &PathBuf) {
     let mut output_path = input_path.clone();
     output_path.set_extension(""); // Removes extension
 
-    let mut gcm = DecryptorInstance::new(key, output_path.clone(), input_path.clone()).expect("test");
+    let mut gcm =
+        DecryptorInstance::new(key, output_path.clone(), input_path.clone()).expect("test");
     if let Err(err) = gcm.decrypt() {
         handle_gcm_error(*err);
     } else {
@@ -89,9 +93,9 @@ fn handle_gcm_error(err: GcmError) {
         GcmError::TagMismatch => {
             eprintln!("Tag mismatch error");
             eprintln!("The file may have been tampered with or the key is incorrect");
-        },
+        }
         GcmError::IoError(io_err) => {
             eprintln!("IO error: {}", io_err);
-        },
+        }
     }
 }
