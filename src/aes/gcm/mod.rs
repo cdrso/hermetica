@@ -121,90 +121,96 @@ macro_rules! conditional_expansion_helper {
     };
 }
 
+// is having this better than code duplication?
 macro_rules! impl_process_buffer {
-    ($instance: ty, $reader: ident, $writer: ident) => {
-        impl ProcessBuffer for $instance {
-            fn process_buffer(&mut self, buffer_index: usize) -> Result<(), Box<GcmError>> {
-                let mut offset = 0;
+    ($reader: ident, $writer: ident) => {
+        fn process_buffer(&mut self, buffer_index: usize) -> Result<(), Box<GcmError>> {
+            let mode = &self.mode();
+            let ctxt = &mut self.context;
+            let mut offset = 0;
 
-                let buffer_size = if buffer_index == self.context.intermediate_buffer_cnt - 1 {
-                    let remaining = self.length - buffer_index * MB;
-                    let mut last_read_buffer = vec![0u8; remaining];
-                    self.$reader.read_exact(&mut last_read_buffer)?;
-                    self.context.intermediate_read_buffer[..remaining]
-                        .copy_from_slice(&last_read_buffer);
-                    remaining
+            let buffer_size = if buffer_index == ctxt.intermediate_buffer_cnt - 1 {
+                let remaining = self.length - buffer_index * MB;
+                let mut last_read_buffer = vec![0u8; remaining];
+                self.$reader.read_exact(&mut last_read_buffer)?;
+                // Work on intermediate buffer for consistency,
+                // we dont care whats past the current buffer size
+                ctxt.intermediate_read_buffer[..remaining].copy_from_slice(&last_read_buffer);
+                remaining
+            } else {
+                self.$reader
+                    .read_exact(&mut ctxt.intermediate_read_buffer)?;
+                MB
+            };
+
+            let buf_blocks = (buffer_size + 15) / 16;
+            for i in 0..buf_blocks {
+                ctxt.ctr_arr[12..].copy_from_slice(bytes_of(&ctxt.ctr));
+
+                let encrypted_counter =
+                    aes::encrypt_block(self.key_schedule, *(from_bytes(&ctxt.ctr_arr)));
+
+                let block_size = if offset + 16 <= buffer_size {
+                    16
                 } else {
-                    self.$reader
-                        .read_exact(&mut self.context.intermediate_read_buffer)?;
-                    MB
+                    buffer_size - offset
                 };
 
-                let buf_blocks = (buffer_size + 15) / 16;
-                for i in 0..buf_blocks {
-                    self.context.ctr_arr[12..].copy_from_slice(bytes_of(&self.context.ctr));
+                let output: u128;
+                // this is the only block that is not 16 bytes
+                if i == buf_blocks - 1 && buffer_index == ctxt.intermediate_buffer_cnt - 1 {
+                    let mut block = conditional_expansion_helper!(
+                        mode,
+                        // on encryption just fill with 0s to 16 bytes
+                        vec![0u8; 16],
+                        // on decryption need to fill remaining space with encrypted
+                        // counter so xor gives back original plain text with
+                        // trailing zeroes (so tags match)
+                        encrypted_counter.to_ne_bytes().to_vec()
+                    );
+                    block[..block_size].copy_from_slice(
+                        &ctxt.intermediate_read_buffer[offset..offset + block_size],
+                    );
+                    output = encrypted_counter ^ from_bytes(&block);
 
-                    let encrypted_counter =
-                        aes::encrypt_block(self.key_schedule, *(from_bytes(&self.context.ctr_arr)));
+                    let gf_mult_operand =
+                        // as explained above
+                        conditional_expansion_helper!(mode, output, *from_bytes(&block));
 
-                    let block_size = if offset + 16 <= buffer_size {
-                        16
-                    } else {
-                        buffer_size - offset
-                    };
+                    ctxt.computed_tag ^= gf_mult(ctxt.gcm_h, gf_mult_operand);
+                } else {
+                    // normal operation
+                    output = encrypted_counter
+                        ^ from_bytes(&ctxt.intermediate_read_buffer[offset..offset + block_size]);
+                    let gf_mult_operand = conditional_expansion_helper!(
+                        mode,
+                        output,
+                        *from_bytes(&ctxt.intermediate_read_buffer[offset..offset + block_size])
+                    );
+                    ctxt.computed_tag ^= gf_mult(ctxt.gcm_h, gf_mult_operand);
+                };
 
-                    let output: u128;
-                    if i == buf_blocks - 1
-                        && buffer_index == self.context.intermediate_buffer_cnt - 1
-                    {
-                        let mut block = conditional_expansion_helper!(
-                            self.mode(),
-                            vec![0u8; 16],
-                            encrypted_counter.to_ne_bytes().to_vec()
-                        );
+                ctxt.intermediate_write_buffer[offset..offset + block_size]
+                    .copy_from_slice(&bytes_of(&output)[0..block_size]);
 
-                        block[..block_size].copy_from_slice(
-                            &self.context.intermediate_read_buffer[offset..offset + block_size],
-                        );
-
-                        output = encrypted_counter ^ from_bytes(&block);
-
-                        let gf_mult_operand =
-                            conditional_expansion_helper!(self.mode(), output, *from_bytes(&block));
-
-                        self.context.computed_tag ^= gf_mult(self.context.gcm_h, gf_mult_operand);
-                    } else {
-                        output = encrypted_counter
-                            ^ from_bytes(
-                                &self.context.intermediate_read_buffer[offset..offset + block_size],
-                            );
-                        let gf_mult_operand = conditional_expansion_helper!(
-                            self.mode(),
-                            output,
-                            *from_bytes(
-                                &self.context.intermediate_read_buffer[offset..offset + block_size]
-                            )
-                        );
-                        self.context.computed_tag ^= gf_mult(self.context.gcm_h, gf_mult_operand);
-                    };
-
-                    self.context.intermediate_write_buffer[offset..offset + block_size]
-                        .copy_from_slice(&bytes_of(&output)[0..block_size]);
-
-                    self.context.ctr += 1;
-                    offset += block_size;
-                }
-                self.$writer
-                    .write_all(&self.context.intermediate_write_buffer[0..offset])?;
-
-                Ok(())
+                ctxt.ctr += 1;
+                offset += block_size;
             }
+            self.$writer
+                .write_all(&ctxt.intermediate_write_buffer[0..offset])?;
+
+            Ok(())
         }
     };
 }
 
-impl_process_buffer!(EncryptorInstance, plain_text, cypher_text);
-impl_process_buffer!(DecryptorInstance, cypher_text, tmp_plain_text);
+impl ProcessBuffer for EncryptorInstance {
+    impl_process_buffer!(plain_text, cypher_text);
+}
+
+impl ProcessBuffer for DecryptorInstance {
+    impl_process_buffer!(cypher_text, tmp_plain_text);
+}
 
 impl EncryptorInstance {
     pub fn new(
