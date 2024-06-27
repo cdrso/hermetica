@@ -2,6 +2,38 @@ pub mod aes_ni;
 pub mod gcm;
 use bytemuck::{bytes_of, bytes_of_mut};
 
+pub struct Key {
+    value: u128,
+}
+
+impl Key {
+    pub fn parse(key_text: String) -> Self {
+        let mut key_bytes = key_text.as_bytes();
+        let mut key_len = key_bytes.len();
+
+        //todo
+        if key_len == 0 {
+            println!("Fuck you");
+        }
+
+        if key_len > 16 {
+            key_len = 16;
+            key_bytes = &key_bytes[0..16]
+        }
+
+        let mut key_bytes_array = [0u8; 16];
+        key_bytes_array[..key_len].copy_from_slice(key_bytes);
+
+        Self {
+            value: u128::from_ne_bytes(key_bytes_array),
+        }
+    }
+
+    pub fn extract(&self) -> u128 {
+        self.value
+    }
+}
+
 pub(crate) fn gen_encryption_key_schedule(key: u128) -> [u32; 44] {
     let mut encryption_key_schedule: [u32; 44] = [0; 44];
     unsafe {

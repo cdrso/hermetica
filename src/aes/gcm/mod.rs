@@ -18,23 +18,7 @@ const MB: usize = 1 << 20;
 // need to sync ctr so thread 1 reads/writes first chunk, thread 2 second chunk etc
 // last block should be processed after threads are merged and final tag operations computed
 
-// https://software.intel.com/sites/default/files/managed/72/cc/clmul-wp-rev-2.02-2014-04-20.pdf
-
-pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
-    let mut product: u128 = 0;
-    unsafe {
-        clmul::clmul_gf(
-            bytes_of(&operand_a).as_ptr(),
-            bytes_of(&operand_b).as_ptr(),
-            bytes_of_mut(&mut product).as_mut_ptr(),
-        );
-    }
-
-    product
-}
-
 pub struct EncryptorInstance {
-    iv: [u8; 12],            // random (truly random) | not owned?
     key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
     length: usize,
     cypher_text: BufWriter<File>, //file | not owned
@@ -43,11 +27,12 @@ pub struct EncryptorInstance {
 }
 
 pub struct DecryptorInstance {
-    iv: [u8; 12],            // random (truly random) | not owned?
     key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
     length: usize,
     cypher_text: BufReader<File>,
     tmp_plain_text: BufWriter<File>,
+    tmp_path: PathBuf,
+    plain_text_path: PathBuf,
     tag: u128,
     context: GcmContext,
 }
@@ -212,6 +197,20 @@ impl ProcessBuffer for DecryptorInstance {
     impl_process_buffer!(cypher_text, tmp_plain_text);
 }
 
+// https://software.intel.com/sites/default/files/managed/72/cc/clmul-wp-rev-2.02-2014-04-20.pdf
+pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
+    let mut product: u128 = 0;
+    unsafe {
+        clmul::clmul_gf(
+            bytes_of(&operand_a).as_ptr(),
+            bytes_of(&operand_b).as_ptr(),
+            bytes_of_mut(&mut product).as_mut_ptr(),
+        );
+    }
+
+    product
+}
+
 impl EncryptorInstance {
     pub fn new(
         key: u128,
@@ -248,7 +247,6 @@ impl EncryptorInstance {
         ctr += 1;
 
         Ok(Self {
-            iv,
             key_schedule,
             length,
             cypher_text,
@@ -291,10 +289,10 @@ impl DecryptorInstance {
         let mut cypher_text = BufReader::new(input_file);
 
         //instead add tmp to name
-        let mut tmp = plain_text_path.clone();
-        tmp.set_file_name("tmp_dec");
+        let mut tmp_path = plain_text_path.clone();
+        tmp_path.set_file_name("tmp_dec");
 
-        let output_file = fs::File::create(&tmp)?;
+        let output_file = fs::File::create(&tmp_path)?;
         let tmp_plain_text = BufWriter::new(output_file);
 
         let mut iv: [u8; 12] = [0; 12];
@@ -326,11 +324,12 @@ impl DecryptorInstance {
         ctr += 1;
 
         Ok(Self {
-            iv,
             key_schedule,
             length,
             cypher_text,
             tmp_plain_text,
+            tmp_path,
+            plain_text_path,
             tag,
             context: GcmContext {
                 ctr,
@@ -350,12 +349,12 @@ impl DecryptorInstance {
         }
         self.context.computed_tag ^= self.length as u128;
         if self.context.computed_tag != self.tag {
-            //fs::remove_file(tmp)?;
+            fs::remove_file(&self.tmp_path)?;
             return Err(Box::new(GcmError::TagMismatch));
         }
         self.tmp_plain_text.flush()?;
-        //fs::remove_file(&self.plain_text)?;
-        //fs::rename(&tmp, &self.plain_text)?;
+        fs::remove_file(&self.plain_text_path)?;
+        fs::rename(&self.tmp_path, &self.plain_text_path)?;
 
         Ok(())
     }
