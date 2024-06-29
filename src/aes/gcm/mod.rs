@@ -8,16 +8,15 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 const MB: usize = 1 << 20;
 
-// Bufreader, one Buf for each thread, do benchmarking to chose buffer size for example 1MB
-// so for example 6 threads with 1MB buffer each, each thread computes its own tag fragment (xor is
-// commutative)
-// each thread computes the cypher for its read buffer
-// need to sync ctr so thread 1 reads/writes first chunk, thread 2 second chunk etc
-// last block should be processed after threads are merged and final tag operations computed
 
+// individual bufreader/bufwriter for each thread that maps to the correct point of
+// the file i see more problems with write than read
+// seek should work for both need to update seek ptr or it will just write to the end of the file
 pub struct EncryptorInstance {
     key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
     length: usize,
@@ -249,9 +248,9 @@ impl EncryptorInstance {
         Ok(Self {
             key_schedule,
             length,
-            cypher_text,
-            plain_text,
-            context: GcmContext {
+            cypher_text, //mut
+            plain_text, //mut
+            context: GcmContext { //mut
                 ctr,
                 ctr_arr,
                 gcm_h,
@@ -264,6 +263,20 @@ impl EncryptorInstance {
     }
 
     pub fn encrypt(&mut self) -> Result<(), Box<GcmError>> {
+
+        /*
+        let handle = thread::spawn(|| -> Result<(), Box<GcmError>> {
+            for buffer_index in 0..self.context.intermediate_buffer_cnt {
+                self.process_buffer(buffer_index)?;
+            }
+            Ok(())
+        });
+        handle.join();
+        */
+
+        let instance = Arc::new(Mutex::new(self.clone()));
+
+
         for buffer_index in 0..self.context.intermediate_buffer_cnt {
             self.process_buffer(buffer_index)?;
         }
