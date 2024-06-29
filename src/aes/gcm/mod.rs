@@ -3,17 +3,17 @@ pub mod clmul;
 use crate::aes;
 use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
 use rand::Rng;
+use rayon::prelude::*;
 use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 
 const MB: usize = 1 << 20;
 
-
+// need to rethink the design so use of rayon is possible
 // individual bufreader/bufwriter for each thread that maps to the correct point of
 // the file i see more problems with write than read
 // seek should work for both need to update seek ptr or it will just write to the end of the file
@@ -127,7 +127,7 @@ macro_rules! impl_process_buffer {
                 MB
             };
 
-            let buf_blocks = (buffer_size + 15) / 16;
+            let buf_blocks = (buffer_size + 15) / 16; //try to make this paralell
             for i in 0..buf_blocks {
                 ctxt.ctr_arr[12..].copy_from_slice(bytes_of(&ctxt.ctr));
 
@@ -189,7 +189,140 @@ macro_rules! impl_process_buffer {
 }
 
 impl ProcessBuffer for EncryptorInstance {
-    impl_process_buffer!(plain_text, cypher_text);
+    //impl_process_buffer!(plain_text, cypher_text);
+    fn process_buffer(&mut self, buffer_index: usize) -> Result<(), Box<GcmError>> {
+        let ctxt = &mut self.context;
+
+        let ctr_init = 0;
+        let block_vec: Vec<(u32, Vec<u8>)>;
+
+        let buffer_size = if buffer_index == ctxt.intermediate_buffer_cnt - 1 {
+            let remaining = self.length - buffer_index * MB;
+            let mut last_read_buffer = vec![0u8; remaining];
+            self.plain_text.read_exact(&mut last_read_buffer)?;
+            let block_vec: Vec<(u32, Vec<u8>)> = last_read_buffer
+                .chunks(16)
+                .enumerate()
+                .map(|(index, block)| (ctr_init + index as u32, block.to_vec()))
+                .collect();
+            ctxt.intermediate_read_buffer[..remaining].copy_from_slice(&last_read_buffer);
+            remaining
+        } else {
+            self.plain_text
+                .read_exact(&mut ctxt.intermediate_read_buffer)?;
+            let block_vec: Vec<(u32, Vec<u8>)> = ctxt.intermediate_read_buffer
+                .chunks(16)
+                .enumerate()
+                .map(|(index, block)| (ctr_init + index as u32, block.to_vec()))
+                .collect();
+            MB
+        };
+
+        let tag_u = AtomicU64::new((ctxt.computed_tag >> 64) as u64);
+        let tag_l = AtomicU64::new(ctxt.computed_tag as u64);
+
+        let mut local_ctr_arr = ctxt.ctr_arr;
+        let local_key_schedule = self.key_schedule;
+        let local_gcm_h = self.context.gcm_h;
+
+        block_vec.par_iter().map(|(ctr, block)| {
+            local_ctr_arr[12..].copy_from_slice(bytes_of(ctr));
+            let encrypted_counter =
+                aes::encrypt_block(local_key_schedule, *(from_bytes(&local_ctr_arr)));
+
+
+
+
+            //if block is less than 16 bytes extend to 16 bytes
+
+            let block_len = block.len();
+            if block_len < 16 {
+                let zero_cnt = 16 - block_len;
+                block.extend(std::iter::repeat(0).take(zero_cnt));
+                assert_eq!(block.len(), 16);
+            }
+
+            let output = encrypted_counter ^ from_bytes(&block);
+            let mult_h = gf_mult(local_gcm_h, output);
+
+            tag_u.fetch_xor((mult_h >> 64) as u64, Ordering::Relaxed);
+            tag_l.fetch_xor(mult_h as u64, Ordering::Relaxed);
+
+            (ctr, output)
+        });
+
+        // put tag u and tag_l into u128 and xor tag
+
+        let w_vec = block_vec.iter().map(|(ctr, vec)| vec).collect();
+
+        // truncate on last if you know what
+        self.cypher_text
+            //(cnt, Vec<u8>)
+            .write_all(&w_vec)?;
+
+
+
+
+
+
+
+
+        //let buf_blocks = (buffer_size + 15) / 16; //try to make this paralell
+        // now i have iterator with 16 byte blocks
+        // need to have for each chunk: ctr_arr, ctr, key, schedule offset?
+
+        // need to think about this differently,
+        // is it possible not to pass self to the paralell computing part?
+        // create an iterator of blocks from the intermediate read buffer
+        // block 0, block 1, ..., block n-1
+        // each block needs:
+        //      its own ctr_arr
+        //      key_schedule
+        //      offset
+        //      need to output tag + encrypted iterator
+
+        /*
+        for i in 0..buf_blocks {
+            ctxt.ctr_arr[12..].copy_from_slice(bytes_of(&ctxt.ctr));
+
+            let encrypted_counter =
+                aes::encrypt_block(self.key_schedule, *(from_bytes(&ctxt.ctr_arr)));
+
+            let block_size = if offset + 16 <= buffer_size {
+                16
+            } else {
+                buffer_size - offset
+            };
+
+            let output: u128;
+            // this is the only block that is not 16 bytes
+            if i == buf_blocks - 1 && buffer_index == ctxt.intermediate_buffer_cnt - 1 {
+                let mut block = vec![0u8; 16];
+                block[..block_size].copy_from_slice(
+                    &ctxt.intermediate_read_buffer[offset..offset + block_size],
+                );
+                output = encrypted_counter ^ from_bytes(&block);
+
+                ctxt.computed_tag ^= gf_mult(ctxt.gcm_h, output);
+            } else {
+                // normal operation
+                output = encrypted_counter
+                    ^ from_bytes(&ctxt.intermediate_read_buffer[offset..offset + block_size]);
+                ctxt.computed_tag ^= gf_mult(ctxt.gcm_h, output);
+            };
+
+            ctxt.intermediate_write_buffer[offset..offset + block_size]
+                .copy_from_slice(&bytes_of(&output)[0..block_size]);
+
+            ctxt.ctr += 1;
+            offset += block_size;
+        }
+        self.cypher_text
+            .write_all(&ctxt.intermediate_write_buffer[0..offset])?;
+        */
+
+        Ok(())
+    }
 }
 
 impl ProcessBuffer for DecryptorInstance {
@@ -249,8 +382,9 @@ impl EncryptorInstance {
             key_schedule,
             length,
             cypher_text, //mut
-            plain_text, //mut
-            context: GcmContext { //mut
+            plain_text,  //mut
+            context: GcmContext {
+                //mut
                 ctr,
                 ctr_arr,
                 gcm_h,
@@ -263,20 +397,6 @@ impl EncryptorInstance {
     }
 
     pub fn encrypt(&mut self) -> Result<(), Box<GcmError>> {
-
-        /*
-        let handle = thread::spawn(|| -> Result<(), Box<GcmError>> {
-            for buffer_index in 0..self.context.intermediate_buffer_cnt {
-                self.process_buffer(buffer_index)?;
-            }
-            Ok(())
-        });
-        handle.join();
-        */
-
-        let instance = Arc::new(Mutex::new(self.clone()));
-
-
         for buffer_index in 0..self.context.intermediate_buffer_cnt {
             self.process_buffer(buffer_index)?;
         }
