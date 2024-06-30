@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use std::sync::{Arc,Mutex};
 
 const MB: usize = 1 << 20;
 
@@ -192,15 +193,16 @@ impl ProcessBuffer for EncryptorInstance {
     //impl_process_buffer!(plain_text, cypher_text);
     fn process_buffer(&mut self, buffer_index: usize) -> Result<(), Box<GcmError>> {
         let ctxt = &mut self.context;
+        let iter_cypher = Arc::new(Mutex::new(&mut self.cypher_text));
 
         let ctr_init = 0;
-        let block_vec: Vec<(u32, Vec<u8>)>;
 
+        let block_vec: Vec<(u32, Vec<u8>)>;
         let buffer_size = if buffer_index == ctxt.intermediate_buffer_cnt - 1 {
             let remaining = self.length - buffer_index * MB;
             let mut last_read_buffer = vec![0u8; remaining];
             self.plain_text.read_exact(&mut last_read_buffer)?;
-            let block_vec: Vec<(u32, Vec<u8>)> = last_read_buffer
+            block_vec = last_read_buffer
                 .chunks(16)
                 .enumerate()
                 .map(|(index, block)| (ctr_init + index as u32, block.to_vec()))
@@ -210,7 +212,7 @@ impl ProcessBuffer for EncryptorInstance {
         } else {
             self.plain_text
                 .read_exact(&mut ctxt.intermediate_read_buffer)?;
-            let block_vec: Vec<(u32, Vec<u8>)> = ctxt.intermediate_read_buffer
+            block_vec =  ctxt.intermediate_read_buffer
                 .chunks(16)
                 .enumerate()
                 .map(|(index, block)| (ctr_init + index as u32, block.to_vec()))
@@ -221,49 +223,53 @@ impl ProcessBuffer for EncryptorInstance {
         let tag_u = AtomicU64::new((ctxt.computed_tag >> 64) as u64);
         let tag_l = AtomicU64::new(ctxt.computed_tag as u64);
 
-        let mut local_ctr_arr = ctxt.ctr_arr;
+        let local_ctr_arr = ctxt.ctr_arr;
         let local_key_schedule = self.key_schedule;
         let local_gcm_h = self.context.gcm_h;
 
-        block_vec.par_iter().map(|(ctr, block)| {
-            local_ctr_arr[12..].copy_from_slice(bytes_of(ctr));
+        block_vec.par_iter().map(|(ctr, ref block)| {
+            //do one of these for each thread
+            //local_ctr_arr[12..].copy_from_slice(bytes_of(ctr));
+            let mut iter_ctr_arr = local_ctr_arr;
+            iter_ctr_arr[12..].copy_from_slice(bytes_of(ctr));
             let encrypted_counter =
-                aes::encrypt_block(local_key_schedule, *(from_bytes(&local_ctr_arr)));
-
-
-
+                aes::encrypt_block(local_key_schedule, *(from_bytes(&iter_ctr_arr)));
 
             //if block is less than 16 bytes extend to 16 bytes
 
             let block_len = block.len();
+            let mut iter_block: Vec<u8>;
             if block_len < 16 {
                 let zero_cnt = 16 - block_len;
-                block.extend(std::iter::repeat(0).take(zero_cnt));
-                assert_eq!(block.len(), 16);
+                //need to create a new block
+                iter_block = block.clone();
+                iter_block.extend(std::iter::repeat(0).take(zero_cnt));
+                assert_eq!(iter_block.len(), 16);
+            } else {
+                //terrible just get everyting working
+                iter_block = block.to_vec();
             }
 
-            let output = encrypted_counter ^ from_bytes(&block);
+            let output = encrypted_counter ^ from_bytes(&iter_block);
             let mult_h = gf_mult(local_gcm_h, output);
 
             tag_u.fetch_xor((mult_h >> 64) as u64, Ordering::Relaxed);
             tag_l.fetch_xor(mult_h as u64, Ordering::Relaxed);
 
-            (ctr, output)
+            output.to_ne_bytes()
+        }).for_each(|cypher_block| {
+            //need to wrap cypher text pointer in Arc mutex
+            let current_cypher = Arc::clone(&iter_cypher);
+            current_cypher.lock().unwrap().write_all(&cypher_block).expect("askldfjasfl");
         });
 
         // put tag u and tag_l into u128 and xor tag
 
-        let w_vec = block_vec.iter().map(|(ctr, vec)| vec).collect();
-
         // truncate on last if you know what
+        /*
         self.cypher_text
-            //(cnt, Vec<u8>)
-            .write_all(&w_vec)?;
-
-
-
-
-
+            .write_all(&block_vec)?;
+        */
 
 
 
