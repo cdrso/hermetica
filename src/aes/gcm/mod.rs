@@ -233,7 +233,10 @@ impl ProcessBuffer for EncryptorInstance {
             let mut iter_ctr_arr = local_ctr_arr;
             iter_ctr_arr[12..].copy_from_slice(bytes_of(ctr));
             let encrypted_counter =
-                aes::encrypt_block(local_key_schedule, *(from_bytes(&iter_ctr_arr)));
+                //from bytes panics wtf
+                // ok now it does not crash
+                //aes::encrypt_block(local_key_schedule, *(from_bytes(&iter_ctr_arr)));
+                aes::encrypt_block(local_key_schedule, u128::from_ne_bytes(iter_ctr_arr));
 
             //if block is less than 16 bytes extend to 16 bytes
 
@@ -266,6 +269,9 @@ impl ProcessBuffer for EncryptorInstance {
         // put tag u and tag_l into u128 and xor tag
 
         // truncate on last if you know what
+        // already done in iterator
+        // missing tag update
+        // wrap in mutex and also do that from iterator
         /*
         self.cypher_text
             .write_all(&block_vec)?;
