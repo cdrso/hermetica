@@ -191,34 +191,30 @@ macro_rules! impl_process_buffer {
 
 impl ProcessBuffer for EncryptorInstance {
     //impl_process_buffer!(plain_text, cypher_text);
+    //try to refactor so it does not suck
+    //dont even know
     fn process_buffer(&mut self, buffer_index: usize) -> Result<(), Box<GcmError>> {
         let ctxt = &mut self.context;
-        let iter_cypher = Arc::new(Mutex::new(&mut self.cypher_text));
 
         let ctr_init = 0;
 
-        let block_vec: Vec<(u32, Vec<u8>)>;
         let buffer_size = if buffer_index == ctxt.intermediate_buffer_cnt - 1 {
             let remaining = self.length - buffer_index * MB;
             let mut last_read_buffer = vec![0u8; remaining];
             self.plain_text.read_exact(&mut last_read_buffer)?;
-            block_vec = last_read_buffer
-                .chunks(16)
-                .enumerate()
-                .map(|(index, block)| (ctr_init + index as u32, block.to_vec()))
-                .collect();
             ctxt.intermediate_read_buffer[..remaining].copy_from_slice(&last_read_buffer);
             remaining
         } else {
             self.plain_text
                 .read_exact(&mut ctxt.intermediate_read_buffer)?;
-            block_vec =  ctxt.intermediate_read_buffer
-                .chunks(16)
-                .enumerate()
-                .map(|(index, block)| (ctr_init + index as u32, block.to_vec()))
-                .collect();
             MB
         };
+
+        let block_vec: Vec<(u32, Vec<u8>)> =  ctxt.intermediate_read_buffer[0..buffer_size]
+            .chunks(16)
+            .enumerate()
+            .map(|(index, block)| (ctr_init + index as u32, block.to_vec()))
+            .collect();
 
         let tag_u = AtomicU64::new((ctxt.computed_tag >> 64) as u64);
         let tag_l = AtomicU64::new(ctxt.computed_tag as u64);
@@ -227,6 +223,9 @@ impl ProcessBuffer for EncryptorInstance {
         let local_key_schedule = self.key_schedule;
         let local_gcm_h = self.context.gcm_h;
 
+        //igual rayon no es la mejor solución, igual hacerlo manualmente no se
+        //joder
+        let iter_cypher = Arc::new(Mutex::new(&mut self.cypher_text));
         block_vec.par_iter().map(|(ctr, ref block)| {
             //do one of these for each thread
             //local_ctr_arr[12..].copy_from_slice(bytes_of(ctr));
@@ -259,9 +258,11 @@ impl ProcessBuffer for EncryptorInstance {
             tag_u.fetch_xor((mult_h >> 64) as u64, Ordering::Relaxed);
             tag_l.fetch_xor(mult_h as u64, Ordering::Relaxed);
 
+            // and remove extra zeroes on last one
             output.to_ne_bytes()
         }).for_each(|cypher_block| {
             //need to wrap cypher text pointer in Arc mutex
+            //pretty sure this is not safe to parallelize
             let current_cypher = Arc::clone(&iter_cypher);
             current_cypher.lock().unwrap().write_all(&cypher_block).expect("askldfjasfl");
         });
