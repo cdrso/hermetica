@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 
+use rayon::prelude::*;
+
 const MB: usize = 1 << 20;
 
 // Bufreader, one Buf for each thread, do benchmarking to chose buffer size for example 1MB
@@ -116,12 +118,12 @@ impl GcmInstance {
 
         // add IV to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
-        ctr_index += 1;
+        //ctr_index += 1;
 
         // To be parallelized
         // thread 1 buffer 0
         for buffer_index in 0..(bufread_cnt) {
-            let mut offset = 0;
+            //let mut offset = 0;
 
             let buffer_size = if buffer_index == bufread_cnt - 1 {
                 let remaining = length - buffer_index * MB;
@@ -135,8 +137,60 @@ impl GcmInstance {
                 MB
             };
 
-            let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
+            let ctr_init = 0;
+            let local_iv = self.iv.unwrap();
+            let local_key_schedule = self.key_schedule;
 
+            //the fucking iterator version is 5 times slower
+            let block_vec: Vec<u8> =
+                read_buffer[..buffer_size]
+                .par_chunks_mut(16)
+                .enumerate()
+                .flat_map(|(index, block)| {
+                    let ctr = (index + ctr_init) as u32;
+
+                    //overhead
+                    let mut ctr_arr = [0u8; 16];
+                    ctr_arr[..12].copy_from_slice(&local_iv);
+
+                    let encrypted_counter =
+                        //bytemuck??
+                        aes::encrypt_block(local_key_schedule, *from_bytes(&ctr_arr));
+
+                    //how much overhead is doing this always
+                    let zero_cnt = 16 - block.len();
+                    //dont think this is doing anything to block , check this
+                    block.to_vec().extend(std::iter::repeat(0).take(zero_cnt));
+                    // no, index / 16 maybe
+                    // and wont hold for last
+                    /*
+                       if index == (buffer_size + 15) / 16 - 1 {
+                    //println!("did i get here");
+                    //panic!("i got here");
+                       }
+                       */
+
+                    let output = encrypted_counter ^ from_bytes(&block);
+                    let mult_h = gf_mult(h, output);
+
+                    /*
+                    tag_u.fetch_xor((mult_h >> 64) as u64, Ordering::Relaxed);
+                    tag_l.fetch_xor(mult_h as u64, Ordering::Relaxed);
+                    */
+
+                    output.to_ne_bytes()[..16-zero_cnt].to_owned()
+                })
+                .collect();
+
+
+            //split for loop in threads
+            //each thread gets its apropiate slice from the write and read buffer
+            //each thread computes its tag
+            //
+
+            /*
+            //rayon
+            let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
             for i in 0..buf_blocks {
                 ctr_arr[12..].copy_from_slice(bytes_of(&ctr_index)); // copy counter bytes into the array
 
@@ -166,9 +220,13 @@ impl GcmInstance {
                 ctr_index += 1;
                 offset += block_size;
             }
+            //rayon
+            */
 
+            //main thing here is reusing write buffer for writing?
             cypher_text_buf
-                .write_all(&write_buffer[0..offset])
+                //.write_all(&write_buffer[0..offset])
+                .write_all(&block_vec)
                 .unwrap();
         }
 
