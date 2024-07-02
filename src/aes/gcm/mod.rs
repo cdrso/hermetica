@@ -9,8 +9,8 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
-
-use rayon::prelude::*;
+use std::thread;
+use std::sync::{Arc, Mutex};
 
 const MB: usize = 1 << 20;
 
@@ -90,10 +90,10 @@ impl GcmInstance {
         let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
         self.iv = Some(iv);
 
-        let input_file = File::open(self.plain_text)?;
+        let input_file = File::open(&self.plain_text)?;
         let mut plain_text_buf = BufReader::new(input_file);
 
-        let output_file = fs::File::create(self.cypher_text)?;
+        let output_file = fs::File::create(&self.cypher_text)?;
         let mut cypher_text_buf = BufWriter::new(output_file);
 
         println!("encrypting...");
@@ -103,7 +103,7 @@ impl GcmInstance {
         let mut tag = 0u128;
         let h = aes::encrypt_block(self.key_schedule, tag);
 
-        let mut ctr_index: u32 = 0;
+        let ctr_index: u32 = 0;
 
         // each bufread read will be 1MB
         let mut read_buffer: [u8; MB] = [0; MB];
@@ -120,11 +120,10 @@ impl GcmInstance {
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
         //ctr_index += 1;
 
+
         // To be parallelized
         // thread 1 buffer 0
         for buffer_index in 0..(bufread_cnt) {
-            //let mut offset = 0;
-
             let buffer_size = if buffer_index == bufread_cnt - 1 {
                 let remaining = length - buffer_index * MB;
                 let mut last_read_buffer = vec![0u8; remaining];
@@ -137,97 +136,120 @@ impl GcmInstance {
                 MB
             };
 
-            let ctr_init = 0;
-            let local_iv = self.iv.unwrap();
-            let local_key_schedule = self.key_schedule;
-
-            //the fucking iterator version is 5 times slower
-            let block_vec: Vec<u8> =
-                read_buffer[..buffer_size]
-                .par_chunks_mut(16)
-                .enumerate()
-                .flat_map(|(index, block)| {
-                    let ctr = (index + ctr_init) as u32;
-
-                    //overhead
-                    let mut ctr_arr = [0u8; 16];
-                    ctr_arr[..12].copy_from_slice(&local_iv);
-
-                    let encrypted_counter =
-                        //bytemuck??
-                        aes::encrypt_block(local_key_schedule, *from_bytes(&ctr_arr));
-
-                    //how much overhead is doing this always
-                    let zero_cnt = 16 - block.len();
-                    //dont think this is doing anything to block , check this
-                    block.to_vec().extend(std::iter::repeat(0).take(zero_cnt));
-                    // no, index / 16 maybe
-                    // and wont hold for last
-                    /*
-                       if index == (buffer_size + 15) / 16 - 1 {
-                    //println!("did i get here");
-                    //panic!("i got here");
-                       }
-                       */
-
-                    let output = encrypted_counter ^ from_bytes(&block);
-                    let mult_h = gf_mult(h, output);
-
-                    /*
-                    tag_u.fetch_xor((mult_h >> 64) as u64, Ordering::Relaxed);
-                    tag_l.fetch_xor(mult_h as u64, Ordering::Relaxed);
-                    */
-
-                    output.to_ne_bytes()[..16-zero_cnt].to_owned()
-                })
-                .collect();
-
-
-            //split for loop in threads
-            //each thread gets its apropiate slice from the write and read buffer
-            //each thread computes its tag
-            //
-
-            /*
-            //rayon
             let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
-            for i in 0..buf_blocks {
-                ctr_arr[12..].copy_from_slice(bytes_of(&ctr_index)); // copy counter bytes into the array
 
-                let encrypted_counter =
-                    aes::encrypt_block(self.key_schedule, *(from_bytes(&ctr_arr)));
+            let half_buf_blocks = buf_blocks / 2;
+            let t1_blocks = half_buf_blocks;
+            let t2_blocks = if buf_blocks % 2 == 0 { half_buf_blocks } else { half_buf_blocks + 1 };
 
-                let block_size = if offset + 16 <= buffer_size {
-                    16
-                } else {
-                    buffer_size - offset
-                };
+            dbg!("{}", buf_blocks);
+            dbg!("{}", t1_blocks);
+            dbg!("{}", t2_blocks);
+            assert_eq!(buf_blocks, t1_blocks + t2_blocks);
 
-                let cypher_text: u128 = if i == buf_blocks - 1 {
-                    // Last iteration logic
-                    let mut block = [0u8; 16]; // Create a temporary array with 16 bytes
-                    block[..block_size].copy_from_slice(&read_buffer[offset..offset + block_size]);
-                    encrypted_counter ^ from_bytes(&block)
-                } else {
-                    // Normal iteration logic
-                    encrypted_counter ^ from_bytes(&read_buffer[offset..offset + block_size])
-                };
+            //problem: último buffer no va a ser de MB
+            //crashea
+            thread::scope(|scope| {
+                //no está teniendo en cuenta el resto
+                let t1_read_buffer = &read_buffer[0..t1_blocks*16];
+                let mut t1_write_buffer = vec![0u8; t1_blocks*16];
 
-                tag ^= gf_mult(h, cypher_text);
+                //move seems to be copying
+                let t1 = scope.spawn( move || {
+                    let mut offset = 0;
+                    let mut ctr_index = 1u32;
 
-                write_buffer[offset..offset+block_size].copy_from_slice(&bytes_of(&cypher_text)[0..block_size]);
+                    for _ in 0..t1_blocks {
+                        ctr_arr[12..].copy_from_slice(bytes_of(&ctr_index)); // copy counter bytes into the array
 
-                ctr_index += 1;
-                offset += block_size;
-            }
-            //rayon
-            */
+                        let encrypted_counter =
+                            aes::encrypt_block(self.key_schedule, *(from_bytes(&ctr_arr)));
 
-            //main thing here is reusing write buffer for writing?
-            cypher_text_buf
-                //.write_all(&write_buffer[0..offset])
-                .write_all(&block_vec)
-                .unwrap();
+                        let block_size = 16;
+
+                        let cypher_text = encrypted_counter ^ from_bytes(&t1_read_buffer[offset..offset + block_size]);
+
+                        tag ^= gf_mult(h, cypher_text);
+
+                        t1_write_buffer[offset..offset+block_size].copy_from_slice(&bytes_of(&cypher_text)[0..block_size]);
+
+                        ctr_index += 1;
+                        offset += block_size;
+                    }
+
+                    return (tag, offset, t1_write_buffer)
+                });
+
+                let t2_read_buffer = &read_buffer[t1_blocks*16..buffer_size];
+                let mut t2_write_buffer = vec![0u8; t2_blocks*16];
+
+                assert_eq!(t1_read_buffer.len() + t2_read_buffer.len(), buffer_size);
+
+                let t2 = scope.spawn( move || {
+                    let mut offset = 0;
+                    //e
+                    let mut ctr_index = (t1_blocks + 1) as u32;
+
+                    for i in t1_blocks..buf_blocks {
+                        ctr_arr[12..].copy_from_slice(bytes_of(&ctr_index)); // copy counter bytes into the array
+
+                        let encrypted_counter =
+                            aes::encrypt_block(self.key_schedule, *(from_bytes(&ctr_arr)));
+
+                        //eaqui el problema
+                        let block_size = if offset + 16 * t1_blocks + 16 <= buffer_size {
+                            16
+                        } else {
+                            buffer_size - (offset + 16 * t1_blocks)
+                        };
+
+                        let cypher_text: u128 = if i == buf_blocks - 1 {
+                            // Last iteration logic
+                            let mut block = [0u8; 16]; // Create a temporary array with 16 bytes
+                            // aquí problem
+                            // range end index 273696 out of range for slice of length 273695
+                            //
+                            dbg!("{}", block_size);
+                            dbg!("{}", offset);
+                            dbg!("{}", t2_read_buffer.len());
+
+                            block[..block_size].copy_from_slice(&t2_read_buffer[offset..offset + block_size]);
+                            encrypted_counter ^ from_bytes(&block)
+                        } else {
+                            // Normal iteration logic
+                            encrypted_counter ^ from_bytes(&t2_read_buffer[offset..offset + block_size])
+                        };
+
+                        tag ^= gf_mult(h, cypher_text);
+
+                        t2_write_buffer[offset..offset+block_size].copy_from_slice(&bytes_of(&cypher_text)[0..block_size]);
+
+                        ctr_index += 1;
+                        offset += block_size;
+                    }
+                    //assert_eq!(offset, buffer_size/2);
+
+                    return (tag, offset, t2_write_buffer)
+                });
+
+                //total offset is sum of offsets
+                //accumulated tag is xor of tags
+
+                let (tag_1, offset_1, t1_write_buffer) = t1.join().unwrap();
+                let (tag_2, offset_2, t2_write_buffer) = t2.join().unwrap();
+
+                tag ^= tag_1 ^ tag_2;
+                let offset = offset_1 + offset_2;
+
+                write_buffer[..t1_blocks*16].copy_from_slice(&t1_write_buffer[..offset_1]);
+                write_buffer[t1_blocks*16..offset].copy_from_slice(&t2_write_buffer[..offset_2]);
+
+                //main thing here is reusing write buffer for writing?
+                cypher_text_buf
+                    .write_all(&write_buffer[0..offset])
+                    .unwrap();
+
+                });
         }
 
         tag ^= length as u128;
