@@ -139,7 +139,7 @@ impl EncryptorInstance {
             //par
             let t1_read_buffer = &read_buffer[..buffer_size];
             let mut t1_write_buffer = vec![0u8; buffer_size];
-            let mut t1_tag = tag;
+            let mut t1_tag = 0;
             let mut t1_offset = offset;
             let mut t1_ctr = ctr_index;
 
@@ -191,8 +191,9 @@ impl EncryptorInstance {
                 let (t1_tag, t1_offset, t1_ctr, t1_write_buffer ) = t1.join().unwrap();
 
                 offset += t1_offset;
+                tag ^= t1_tag;
+
                 ctr_index = t1_ctr;
-                tag = t1_tag;
 
                 cypher_text_buf
                     .write_all(&t1_write_buffer[0..offset])
