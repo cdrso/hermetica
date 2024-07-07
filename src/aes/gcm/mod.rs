@@ -9,12 +9,6 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write, Seek};
 use std::path::PathBuf;
 use std::thread::scope;
-use aligned_array::{Aligned, A16, AsAlignedChunks};
-use generic_array::GenericArray;
-use generic_array::typenum::U8;
-
-// shorthand aliases to make it easier to write tests
-type A16Bytes<N> = Aligned<A16, GenericArray<u8, N>>;
 
 //https://docs.rs/aligned-array/latest/aligned_array/index.html
 
@@ -123,7 +117,11 @@ impl EncryptorInstance {
         // add IV to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
 
-        dbg!(tag);
+        //dbg
+        let mut total_cnt = 0;
+
+        let mut t1_ctr: u32 = 1u32;
+        let mut t2_ctr: u32 = (((MB as u32+ 15) / 16) / 2) + 1;
 
         for buffer_index in 0..(bufread_cnt) {
 
@@ -139,15 +137,21 @@ impl EncryptorInstance {
                 MB
             };
 
+            total_cnt += buffer_size;
+
             let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
 
+            //wtf works for arch.iso but not video.mp4
+            //what is special about arch iso
+            //its big?
+            //its becase sizeof arch.iso % 16 = 0 !!
             //par
             scope(|scope| {
                 let t1_read_buffer = &read_buffer[..((buf_blocks / 2) * 16)];
                 let mut t1_write_buffer = vec![0u8; (buf_blocks / 2) * 16];
                 let mut t1_tag: u128 = 0u128;
                 let mut t1_offset = 0;
-                let mut t1_ctr: u32 = 1u32;
+                //mal, independiente del buffer
                 let mut t1_ctr_arr: [u8; 16] = ctr_arr;
 
                 let t1 = scope.spawn(move || {
@@ -173,12 +177,17 @@ impl EncryptorInstance {
                     (t1_tag, t1_offset, t1_ctr, t1_write_buffer)
                 });
 
-                let t2_read_buffer = &read_buffer[(buf_blocks / 2) * 16..];
-                let mut t2_write_buffer = vec![0u8; buffer_size - (buf_blocks / 2) * 16];
+                let t2_read_buffer = &read_buffer[((buf_blocks / 2) * 16)..];
+                let mut t2_write_buffer = vec![0u8; buffer_size - ((buf_blocks / 2) * 16)];
                 let mut t2_tag: u128 = 0u128;
                 let mut t2_offset = 0;
-                let mut t2_ctr: u32 = ((buf_blocks / 2) + 1) as u32;
+                //mal, independiente del buffer
+                //pero entonces pq cojones coincidía el tag para arch.iso???
+                //wtfffffffffffffff TODO
                 let mut t2_ctr_arr: [u8; 16] = ctr_arr;
+
+                // tamaño mucho menor pq? no pasa si es todo divisible entre 16
+                // ahora ya da bien el tamaño xd
 
                 let t2 = scope.spawn(move || {
                     for i in 0..(buf_blocks - buf_blocks / 2) {
@@ -191,13 +200,19 @@ impl EncryptorInstance {
                         let block_size = if (t2_offset + (buf_blocks / 2) * 16) + 16 <= buffer_size {
                             16
                         } else {
-                            buffer_size - (t2_offset + (buf_blocks / 2) * 16)
+                            buffer_size - ((t2_offset + (buf_blocks / 2) * 16))
                         };
 
-                        let cypher_text: u128 = if i == (buf_blocks - buf_blocks / 2) - 1  {
+
+                        let cypher_text: u128 = if i == (buf_blocks - buf_blocks / 2) - 1 {
                             // Last iteration logic
+                            // me estás jodiendo
+                            // dbg!(block_size);
                             let mut block = [0u8; 16]; // Create a temporary array with 16 bytes
                             block[..block_size].copy_from_slice(&t2_read_buffer[t2_offset..t2_offset + block_size]);
+                            dbg!(t2_ctr);
+                            dbg!(buffer_size);
+                            dbg!(block);
                             encrypted_counter ^ from_bytes(&block)
                         } else {
                             encrypted_counter ^ from_bytes(&t2_read_buffer[t2_offset..t2_offset + block_size])
@@ -214,22 +229,28 @@ impl EncryptorInstance {
                 });
 
                 let (t1_tag, t1_offset, _t1_ctr, t1_write_buffer ) = t1.join().unwrap();
-                let (t2_tag, t2_offset, t2_ctr, t2_write_buffer ) = t2.join().unwrap();
+                let (t2_tag, t2_offset, _t2_ctr, t2_write_buffer ) = t2.join().unwrap();
 
-                assert_eq!(buf_blocks as u32, t2_ctr - 1);
+                assert_eq!(t2_offset, t2_write_buffer.len());
                 assert_eq!(t1_offset + t2_offset, buffer_size);
 
                 tag ^= t1_tag;
                 tag ^= t2_tag;
 
                 cypher_text_buf
-                    .write_all(&t1_write_buffer[..t1_offset])
+                    .write_all(&t1_write_buffer/*[..t1_offset]*/)
                     .unwrap();
                 cypher_text_buf
-                    .write_all(&t2_write_buffer[..t2_offset])
+                    .write_all(&t2_write_buffer/*[..t2_offset]*/)
                     .unwrap();
+
+                t1_ctr = _t1_ctr + t2_ctr; //buf_blocks as u32 - buf_blocks as u32 / 2 ;
+                t2_ctr = _t2_ctr + t1_ctr; //buf_blocks as u32 / 2;
             });
+
         }
+
+        assert_eq!(total_cnt, self.length);
 
         tag ^= self.length as u128;
 
@@ -283,7 +304,7 @@ impl DecryptorInstance {
         cypher_text_buf.seek(std::io::SeekFrom::Start(cypher_position))?;
 
         let mut tag = 0u128;
-        let h = aes::encrypt_block(self.key_schedule, tag);
+        let h = aes::encrypt_block(self.key_schedule, 0u128);
 
         let mut ctr_index: u32 = 0;
 
@@ -294,12 +315,14 @@ impl DecryptorInstance {
 
         let mut ctr_arr = [0u8; 16]; // create a fixed-size array with 16 bytes
         ctr_arr[..12].copy_from_slice(&iv); // copy IV bytes into the array
-        ctr_arr[12..].copy_from_slice(bytes_of(&ctr_index)); // copy counter bytes into the array
+        ctr_arr[12..].copy_from_slice(bytes_of(&0u32)); // copy counter bytes into the array
 
         // add iv to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
 
         dbg!(tag);
+
+        let mut total_cnt = 0;
 
         ctr_index += 1;
 
@@ -318,6 +341,8 @@ impl DecryptorInstance {
                 MB
             };
 
+            total_cnt += buffer_size;
+
             let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
 
             //par
@@ -335,12 +360,20 @@ impl DecryptorInstance {
 
                 let plain_text: u128 = if i == buf_blocks - 1 {
                     // Last iteration logic
-                    dbg!("{}", tag);
-                    dbg!("{}", ctr_index);
-                    dbg!("{}", buffer_size);
-                    let mut block = encrypted_counter.to_ne_bytes(); // Create a temporary array with 16 bytes
+                    // cypher = encrypted ctr xor plain
+                    dbg!(ctr_index);
+                    dbg!(buffer_size);
+                    let mut block = [0u8; 16];
                     block[..block_size].copy_from_slice(&read_buffer[offset..offset + block_size]);
+                    block[block_size..].copy_from_slice(&encrypted_counter.to_ne_bytes()[block_size..]);
                     tag ^= gf_mult(h, *from_bytes(&block));
+                    dbg!(block);
+                //mal, independiente del buffer
+
+                    //??
+                    //let mut block = encrypted_counter.to_ne_bytes(); // Create a temporary array with 16 bytes
+                    //not aligned
+                    //tags needs trailing zeroes, which is not what is in here
 
                     encrypted_counter ^ from_bytes(&block)
                 } else {
@@ -361,6 +394,9 @@ impl DecryptorInstance {
                 .write_all(&write_buffer[0..offset])
                 .unwrap();
         }
+
+        assert_eq!(total_cnt, self.length);
+        assert_eq!(ctr_index - 1, (self.length as u32 + 15) / 16);
 
         tag ^= self.length as u128;
 
