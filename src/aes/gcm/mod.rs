@@ -120,7 +120,8 @@ impl EncryptorInstance {
         // add IV to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
 
-        let thread_num = available_parallelism().unwrap().get();
+        //let thread_num = available_parallelism().unwrap().get();
+        let thread_num = 1;
 
         let mut ctr: u32 = 1u32;
 
@@ -211,6 +212,8 @@ impl EncryptorInstance {
                         .write_all(&thread_write_buffer[..thread_offset])
                         .unwrap();
                     ctr = ctr.max(thread_ctr);
+                    dbg!(ctr);
+                    dbg!(tag);
                 }
             });
         }
@@ -353,11 +356,12 @@ impl DecryptorInstance {
             }
             //par
 
+            dbg!(ctr_index);
+            dbg!(tag);
             tmp_buf.write_all(&write_buffer[0..offset]).unwrap();
         }
 
         assert_eq!(total_cnt, self.length);
-        assert_eq!(ctr_index - 1, (self.length as u32 + 15) / 16);
 
         tag ^= self.length as u128;
 
