@@ -6,7 +6,6 @@ use clap::{Parser, ValueEnum};
 use rpassword::read_password;
 use std::env;
 use std::path::PathBuf;
-use std::process::exit;
 
 #[derive(Parser)]
 struct CommandLineArgs {
@@ -30,12 +29,12 @@ fn main() {
 
     println!("Insert Key:");
     let key_input_1 = read_password().expect("Failed to read password");
-    println!("Confirm Key");
+    println!("Confirm Key:");
     let key_input_2 = read_password().expect("Failed to read password");
 
     if key_input_1 != key_input_2 {
         println!("Key inputs do not match, aborting");
-        exit(1);
+        main();
     }
 
     //type driven design

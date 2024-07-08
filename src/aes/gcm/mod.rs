@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
 use std::thread::{available_parallelism, scope};
+use indicatif::ProgressBar;
 
 //https://docs.rs/aligned-array/latest/aligned_array/index.html
 
@@ -49,9 +50,11 @@ pub struct DecryptorInstance {
     plain_text: PathBuf,
 }
 
+/*
 trait ProcessBuffer {
     fn process_buffer(&mut self, buffer_index: usize) -> Result<(), Box<GcmError>>;
 }
+*/
 
 #[derive(Debug)]
 pub enum GcmError {
@@ -124,7 +127,10 @@ impl EncryptorInstance {
 
         let mut ctr: u32 = 1u32;
 
+        println!("");
+        let bar = ProgressBar::new(bufread_cnt as u64);
         for buffer_index in 0..(bufread_cnt) {
+            bar.inc(1);
             let buffer_size = if buffer_index == bufread_cnt - 1 {
                 let remaining = self.length - buffer_index * MB;
                 let mut last_read_buffer = vec![0u8; remaining];
@@ -136,8 +142,6 @@ impl EncryptorInstance {
                 plain_text_buf.read_exact(&mut read_buffer)?;
                 MB
             };
-
-            //dbg!(buffer_size);
 
             let buf_blocks = (buffer_size + 15) / 16;
             let blocks_per_thread = buf_blocks / thread_num;
@@ -154,7 +158,6 @@ impl EncryptorInstance {
                         start_block + blocks_per_thread
                     };
 
-                    //puede ser el min el problema
                     let thread_read_buffer =
                         &read_buffer[(start_block * 16)..((end_block * 16).min(buffer_size))];
                     let mut thread_write_buffer = vec![0u8; (end_block - start_block) * 16];
@@ -214,11 +217,12 @@ impl EncryptorInstance {
                 }
             });
         }
-
         tag ^= self.length as u128;
 
         cypher_text_buf.write_all(bytes_of(&tag))?;
         cypher_text_buf.flush()?;
+
+        bar.finish_and_clear();
 
         Ok(())
     }
@@ -268,10 +272,7 @@ impl DecryptorInstance {
         let mut tag = 0u128;
         let h = aes::encrypt_block(self.key_schedule, 0u128);
 
-        let mut ctr_index: u32 = 0;
-
         let mut read_buffer: [u8; MB] = [0; MB];
-        let mut write_buffer: [u8; MB] = [0; MB];
 
         let bufread_cnt = (self.length + MB - 1) / MB;
 
@@ -282,12 +283,14 @@ impl DecryptorInstance {
         // add iv to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
 
-        let mut total_cnt = 0;
+        let thread_num = available_parallelism().unwrap().get();
 
-        ctr_index += 1;
+        let mut ctr: u32 = 1u32;
 
+        println!("");
+        let bar = ProgressBar::new(bufread_cnt as u64);
         for buffer_index in 0..(bufread_cnt) {
-            let mut offset = 0;
+            bar.inc(1);
 
             let buffer_size = if buffer_index == bufread_cnt - 1 {
                 let remaining = self.length - buffer_index * MB;
@@ -301,74 +304,93 @@ impl DecryptorInstance {
                 MB
             };
 
-            total_cnt += buffer_size;
+            let buf_blocks = (buffer_size + 15) / 16;
+            let blocks_per_thread = buf_blocks / thread_num;
+            let remainder_blocks = buf_blocks % thread_num;
 
-            let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
+            scope(|scope| {
+                let mut thread_results = Vec::new();
 
-            //par
-            for i in 0..buf_blocks {
-                ctr_arr[12..].copy_from_slice(bytes_of(&ctr_index)); // copy counter bytes into the array
-                                                                     //dbg!(ctr_arr);
+                for thread_id in 0..thread_num {
+                    let start_block = thread_id * blocks_per_thread;
+                    let end_block = if thread_id == thread_num - 1 {
+                        start_block + blocks_per_thread + remainder_blocks
+                    } else {
+                        start_block + blocks_per_thread
+                    };
 
-                let encrypted_counter =
-                    aes::encrypt_block(self.key_schedule, *(from_bytes(&ctr_arr)));
+                    let thread_read_buffer =
+                        &read_buffer[(start_block * 16)..((end_block * 16).min(buffer_size))];
+                    let mut thread_write_buffer = vec![0u8; (end_block - start_block) * 16];
+                    let mut thread_tag: u128 = 0u128;
+                    let mut thread_offset = 0;
+                    let mut thread_ctr_arr: [u8; 16] = ctr_arr;
+                    let mut thread_ctr: u32 = ctr + (start_block as u32);
 
-                let block_size = if offset + 16 <= buffer_size {
-                    16
-                } else {
-                    buffer_size - offset
-                };
+                    let thread = scope.spawn(move || {
+                        for _ in 0..(end_block - start_block) {
+                            thread_ctr_arr[12..].copy_from_slice(bytes_of(&thread_ctr));
 
-                let plain_text: u128 = if i == buf_blocks - 1 {
-                    // Last iteration logic
-                    // cypher = encrypted ctr xor plain
-                    /*
-                    dbg!(encrypted_counter);
-                    dbg!(ctr_index);
-                    dbg!(buffer_size);
-                    */
-                    let mut block = [0u8; 16];
-                    block[..block_size].copy_from_slice(&read_buffer[offset..offset + block_size]);
-                    //no coincide
-                    block[block_size..]
-                        .copy_from_slice(&encrypted_counter.to_ne_bytes()[block_size..]);
-                    tag ^= gf_mult(h, *from_bytes(&block));
-                    /*
-                    dbg!(tag);
-                    dbg!("cypher text: {}", block); //cypher text
-                    dbg!("plain text: {}", bytes_of(&(encrypted_counter ^ from_bytes(&block))));
-                    dbg!(offset);
-                    */
-                    encrypted_counter ^ from_bytes(&block)
-                } else {
-                    tag ^= gf_mult(h, *from_bytes(&read_buffer[offset..offset + block_size]));
-                    encrypted_counter ^ from_bytes(&read_buffer[offset..offset + block_size])
-                };
+                            let encrypted_counter = aes::encrypt_block(
+                                self.key_schedule,
+                                *(from_bytes(&thread_ctr_arr)),
+                            );
 
-                write_buffer[offset..offset + block_size]
-                    .copy_from_slice(&bytes_of(&plain_text)[0..block_size]);
+                            let mut block_size = 16;
 
-                ctr_index += 1;
-                offset += block_size;
-            }
-            //par
+                            let plain_text: u128 = if thread_offset + 16 > thread_read_buffer.len()
+                            {
+                                block_size = thread_read_buffer.len() - thread_offset;
+                                let mut block = [0u8; 16];
+                                block[..block_size]
+                                    .copy_from_slice(&thread_read_buffer[thread_offset..]);
+                                block[block_size..]
+                                    .copy_from_slice(&encrypted_counter.to_ne_bytes()[block_size..]);
+                                thread_tag ^= gf_mult(h, *from_bytes(&block));
 
-            tmp_buf.write_all(&write_buffer[0..offset]).unwrap();
+                                encrypted_counter ^ from_bytes(&block)
+                            } else {
+                                thread_tag ^= gf_mult(h, *from_bytes(&thread_read_buffer[thread_offset..thread_offset + block_size]));
+                                encrypted_counter ^ from_bytes(&thread_read_buffer[thread_offset..thread_offset + block_size])
+                            };
+
+                            thread_write_buffer[thread_offset..thread_offset + block_size]
+                                .copy_from_slice(&bytes_of(&plain_text)[..block_size]);
+
+                            thread_ctr += 1;
+                            thread_offset += block_size;
+                        }
+
+                        (thread_tag, thread_offset, thread_ctr, thread_write_buffer)
+                    });
+
+                    thread_results.push(thread);
+                }
+
+                for thread_result in thread_results {
+                    let (thread_tag, thread_offset, thread_ctr, thread_write_buffer) =
+                        thread_result.join().unwrap();
+                    tag ^= thread_tag;
+                    tmp_buf
+                        .write_all(&thread_write_buffer[..thread_offset])
+                        .unwrap();
+                    ctr = ctr.max(thread_ctr);
+                }
+            });
         }
-
-        assert_eq!(total_cnt, self.length);
-
         tag ^= self.length as u128;
 
         if tag != read_tag {
-            // if i remove the commented out blocks then it does not crash
             fs::remove_file(tmp)?;
+            bar.finish_and_clear();
             return Err(Box::new(GcmError::TagMismatch));
         }
 
         tmp_buf.flush()?;
         fs::remove_file(&self.plain_text)?;
         fs::rename(&tmp, &self.plain_text)?;
+
+        bar.finish_and_clear();
 
         Ok(())
     }
