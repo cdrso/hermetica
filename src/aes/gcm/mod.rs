@@ -121,7 +121,7 @@ impl EncryptorInstance {
         let mut total_cnt = 0;
 
         let mut t1_ctr: u32 = 1u32;
-        let mut t2_ctr: u32 = (((MB as u32+ 15) / 16) / 2) + 1;
+        let mut t2_ctr: u32 = 1u32;
 
         for buffer_index in 0..(bufread_cnt) {
 
@@ -140,6 +140,8 @@ impl EncryptorInstance {
             total_cnt += buffer_size;
 
             let buf_blocks = (buffer_size + 15) / 16; // Calculate number of 16-byte blocks
+                                                      //
+            t2_ctr += (buf_blocks / 2) as u32;
 
             //wtf works for arch.iso but not video.mp4
             //what is special about arch iso
@@ -205,9 +207,6 @@ impl EncryptorInstance {
 
 
                         let cypher_text: u128 = if i == (buf_blocks - buf_blocks / 2) - 1 {
-                            // Last iteration logic
-                            // me estás jodiendo
-                            // dbg!(block_size);
                             let mut block = [0u8; 16]; // Create a temporary array with 16 bytes
                             block[..block_size].copy_from_slice(&t2_read_buffer[t2_offset..t2_offset + block_size]);
                             dbg!(t2_ctr);
@@ -238,16 +237,16 @@ impl EncryptorInstance {
                 tag ^= t2_tag;
 
                 cypher_text_buf
-                    .write_all(&t1_write_buffer/*[..t1_offset]*/)
+                    .write_all(&t1_write_buffer)
                     .unwrap();
                 cypher_text_buf
-                    .write_all(&t2_write_buffer/*[..t2_offset]*/)
+                    .write_all(&t2_write_buffer)
                     .unwrap();
 
-                t1_ctr = _t1_ctr + t2_ctr; //buf_blocks as u32 - buf_blocks as u32 / 2 ;
-                t2_ctr = _t2_ctr + t1_ctr; //buf_blocks as u32 / 2;
-            });
+                t1_ctr = _t1_ctr + (buf_blocks - buf_blocks / 2) as u32; //buf_blocks as u32 - buf_blocks as u32 / 2 ;
+                t2_ctr = _t2_ctr;
 
+            });
         }
 
         assert_eq!(total_cnt, self.length);
