@@ -52,8 +52,7 @@ fn handle_encryption(key: Key, input_path: &PathBuf) {
     let mut output_path = input_path.clone();
     output_path.as_mut_os_string().push(".hmtc");
 
-    let gcm =
-        EncryptorInstance::new(key, input_path.clone(), output_path.clone()).expect("test");
+    let gcm = EncryptorInstance::new(key, input_path.clone(), output_path.clone()).expect("test");
     if let Err(err) = gcm.encrypt() {
         handle_gcm_error(*err);
     } else {
@@ -66,8 +65,7 @@ fn handle_decryption(key: Key, input_path: &PathBuf) {
     let mut output_path = input_path.clone();
     output_path.set_extension(""); // Removes extension
 
-    let gcm =
-        DecryptorInstance::new(key, output_path.clone(), input_path.clone()).expect("test");
+    let gcm = DecryptorInstance::new(key, output_path.clone(), input_path.clone()).expect("test");
     if let Err(err) = gcm.decrypt() {
         handle_gcm_error(*err);
     } else {
@@ -80,9 +78,9 @@ fn handle_gcm_error(err: GcmError) {
         GcmError::TagMismatch => {
             eprintln!("Tag mismatch error");
             eprintln!("Either this is not an htmc file, the file may have been tampered with or the key is incorrect");
-        },
+        }
         GcmError::IoError(io_err) => {
             eprintln!("IO error: {}", io_err);
-        },
+        }
     }
 }
