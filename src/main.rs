@@ -1,11 +1,16 @@
 mod aes;
 
-use aes::gcm::{DecryptorInstance, EncryptorInstance, GcmError};
+use aes::gcm::{GcmError, GcmInstance};
 use aes::Key;
 use clap::{Parser, ValueEnum};
 use rpassword::read_password;
 use std::env;
 use std::path::PathBuf;
+
+/*
+ * try to get rid of clap and rpassword, just std if possible
+ * I don't really like this main file
+ */
 
 #[derive(Parser)]
 struct CommandLineArgs {
@@ -24,51 +29,40 @@ enum Mode {
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
-
     let args = CommandLineArgs::parse();
 
     println!("Insert Key:");
-    let key_input_1 = read_password().expect("Failed to read password");
+    let key_text_1 = read_password().expect("Failed to read password");
     println!("Confirm Key:");
-    let key_input_2 = read_password().expect("Failed to read password");
+    let key_text_2 = read_password().expect("Failed to read password");
 
-    if key_input_1 != key_input_2 {
+    if key_text_1 != key_text_2 {
         println!("Key inputs do not match, aborting");
-        main();
+        return;
     }
-
-    //type driven design
-    let parsed_key = Key::parse(key_input_1);
+    let key = Key::parse(key_text_1);
 
     match args.op {
-        Mode::Encrypt => handle_encryption(parsed_key, &args.path),
-        Mode::Decrypt => handle_decryption(parsed_key, &args.path),
+        Mode::Encrypt => handle_encryption(key, args.path),
+        Mode::Decrypt => handle_decryption(key, args.path),
     }
 }
 
-fn handle_encryption(key: Key, input_path: &PathBuf) {
-    let key = key.extract();
-    let mut output_path = input_path.clone();
-    output_path.as_mut_os_string().push(".hmtc");
+fn handle_encryption(key: Key, file: PathBuf) {
+    let key_val = key.extract();
+    let gcm = GcmInstance::new(key_val);
 
-    let gcm = EncryptorInstance::new(key, input_path.clone(), output_path.clone()).expect("test");
-    if let Err(err) = gcm.encrypt() {
-        handle_gcm_error(*err);
-    } else {
-        println!("Encryption successful! Encrypted file: {:?}", output_path);
+    if let Err(err) = gcm.encrypt(file) {
+        handle_gcm_error(err);
     }
 }
 
-fn handle_decryption(key: Key, input_path: &PathBuf) {
-    let key = key.extract();
-    let mut output_path = input_path.clone();
-    output_path.set_extension(""); // Removes extension
+fn handle_decryption(key: Key, file: PathBuf) {
+    let key_val = key.extract();
+    let gcm = GcmInstance::new(key_val);
 
-    let gcm = DecryptorInstance::new(key, output_path.clone(), input_path.clone()).expect("test");
-    if let Err(err) = gcm.decrypt() {
-        handle_gcm_error(*err);
-    } else {
-        println!("Decryption successful! Decrypted file: {:?}", output_path);
+    if let Err(err) = gcm.decrypt(file) {
+        handle_gcm_error(err);
     }
 }
 

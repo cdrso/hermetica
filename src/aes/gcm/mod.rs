@@ -2,27 +2,54 @@ pub mod clmul;
 
 use crate::aes;
 use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
+use indicatif::ProgressBar;
 use rand::Rng;
 use std::fmt;
 use std::fs;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::thread::{available_parallelism, scope};
-use indicatif::ProgressBar;
-
-//https://docs.rs/aligned-array/latest/aligned_array/index.html
-
-const MB: usize = 1 << 20;
-
-// Bufreader, one Buf for each thread, do benchmarking to chose buffer size for example 1MB
-// so for example 6 threads with 1MB buffer each, each thread computes its own tag fragment (xor is
-// commutative)
-// each thread computes the cypher for its read buffer
-// need to sync ctr so thread 1 reads/writes first chunk, thread 2 second chunk etc
-// last block should be processed after threads are merged and final tag operations computed
+use std::thread;
 
 // https://software.intel.com/sites/default/files/managed/72/cc/clmul-wp-rev-2.02-2014-04-20.pdf
+
+/*
+ * what is needed from user for a gcm instance?
+ * key and file
+ * file should be tied to encryption or decryption, not to struct or so i think
+ */
+/*
+ * maybe more generalized implementation
+ * general case -> encrypt &[u8]
+ * extrapolate file to general case
+ * Really? In the end this is a file encryption application
+ */
+
+pub struct GcmInstance {
+    key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
+}
+
+#[derive(Debug)]
+pub enum GcmError {
+    IoError(std::io::Error),
+    TagMismatch,
+}
+
+pub type GcmResult<T> = Result<T, GcmError>;
+
+impl std::fmt::Display for GcmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            GcmError::IoError(ref err) => write!(f, "IO error: {}", err),
+            GcmError::TagMismatch => write!(f, "Tag mismatch during decryption"),
+        }
+    }
+}
+
+impl From<std::io::Error> for GcmError {
+    fn from(err: std::io::Error) -> Self {
+        GcmError::IoError(err)
+    }
+}
 
 pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
     let mut product: u128 = 0;
@@ -36,103 +63,64 @@ pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
 
     product
 }
-pub struct EncryptorInstance {
-    key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
-    length: usize,
-    cypher_text: PathBuf, //file | not owned
-    plain_text: PathBuf,  // | owned
-}
-
-pub struct DecryptorInstance {
-    key_schedule: [u32; 44], //gen from key, no need for key_schedule_decrypt | owned
-    length: usize,
-    cypher_text: PathBuf,
-    plain_text: PathBuf,
-}
 
 /*
-trait ProcessBuffer {
-    fn process_buffer(&mut self, buffer_index: usize) -> Result<(), Box<GcmError>>;
-}
-*/
+ * steps to decompose encryption-decryption
+ * init -> everything before := Bufreader/writer, iv, tag, ctr_arr, thread_num?
+ * encrypt-decrypt each intermediate buffer
+ * end -> everyting after := last tag xor with len, flush
+ * consider structs that encapsulate repeader arguments
+ */
+/*
+ * try to make the most out of indicatif
+ * might as well if going to use it
+ */
 
-#[derive(Debug)]
-pub enum GcmError {
-    IoError(std::io::Error),
-    TagMismatch,
-}
-
-impl std::fmt::Display for GcmError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            GcmError::IoError(ref err) => write!(f, "IO error: {}", err),
-            GcmError::TagMismatch => write!(f, "Tag mismatch during decryption"),
-        }
-    }
-}
-
-impl From<std::io::Error> for Box<GcmError> {
-    fn from(err: std::io::Error) -> Self {
-        Box::new(GcmError::IoError(err))
-    }
-}
-
-impl EncryptorInstance {
-    pub fn new(
-        key: u128,
-        plain_text: PathBuf,
-        cypher_text: PathBuf,
-    ) -> Result<Self, Box<GcmError>> {
+const BUFFER_SIZE: usize = 1 << 20;
+impl GcmInstance {
+    pub fn new(key: u128) -> Self {
         let key_schedule = aes::gen_encryption_key_schedule(key);
+
+        Self { key_schedule }
+    }
+
+    pub fn encrypt(&self, plain_text: PathBuf) -> GcmResult<(u128, PathBuf)> {
         let length = fs::metadata(&plain_text)?.len() as usize;
 
-        Ok(Self {
-            key_schedule,
-            length,
-            plain_text,
-            cypher_text,
-        })
-    }
-
-    pub fn encrypt(self) -> Result<(), Box<GcmError>> {
-        let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
-
-        let input_file = File::open(self.plain_text)?;
+        let input_file = fs::File::open(&plain_text)?;
         let mut plain_text_buf = BufReader::new(input_file);
 
-        let output_file = fs::File::create(self.cypher_text)?;
+        let mut cypher_text = plain_text;
+        cypher_text.as_mut_os_string().push(".hmtc");
+
+        let output_file = fs::File::create(&cypher_text)?;
         let mut cypher_text_buf = BufWriter::new(output_file);
 
-        println!("encrypting...");
+        let iv: [u8; 12] = rand::thread_rng().gen::<[u8; 12]>();
 
         cypher_text_buf.write_all(&iv)?;
 
         let mut tag = 0u128;
         let h = aes::encrypt_block(self.key_schedule, 0u128);
 
-        // each bufread read will be 1MB
-        let mut read_buffer = [0u8; MB];
-
-        // how many 1MB reads are necesary for the entire file
-        let bufread_cnt = (self.length + MB - 1) / MB;
+        let mut read_buffer = [0u8; BUFFER_SIZE];
+        let bufread_cnt = (length + BUFFER_SIZE - 1) / BUFFER_SIZE;
 
         let mut ctr_arr = [0u8; 16]; // create a fixed-size array with 16 bytes
         ctr_arr[..12].copy_from_slice(&iv); // copy IV bytes into the array
-        ctr_arr[12..].copy_from_slice(bytes_of(&0u32)); // copy counter bytes into the array
 
         // add IV to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
 
-        let thread_num = available_parallelism().unwrap().get();
+        let thread_num = thread::available_parallelism().unwrap().get();
 
         let mut ctr: u32 = 1u32;
 
-        println!("");
         let bar = ProgressBar::new(bufread_cnt as u64);
         for buffer_index in 0..(bufread_cnt) {
             bar.inc(1);
             let buffer_size = if buffer_index == bufread_cnt - 1 {
-                let remaining = self.length - buffer_index * MB;
+                let remaining = length - buffer_index * BUFFER_SIZE;
                 let mut last_read_buffer = vec![0u8; remaining];
                 plain_text_buf.read_exact(&mut last_read_buffer)?;
                 read_buffer[..remaining].copy_from_slice(&last_read_buffer);
@@ -140,14 +128,14 @@ impl EncryptorInstance {
             } else {
                 // This is a full buffer; read 1MB of data
                 plain_text_buf.read_exact(&mut read_buffer)?;
-                MB
+                BUFFER_SIZE
             };
 
             let buf_blocks = (buffer_size + 15) / 16;
             let blocks_per_thread = buf_blocks / thread_num;
             let remainder_blocks = buf_blocks % thread_num;
 
-            scope(|scope| {
+            thread::scope(|scope| {
                 let mut thread_results = Vec::new();
 
                 for thread_id in 0..thread_num {
@@ -206,9 +194,9 @@ impl EncryptorInstance {
                     thread_results.push(thread);
                 }
 
-                for thread_result in thread_results {
+                for result in thread_results {
                     let (thread_tag, thread_offset, thread_ctr, thread_write_buffer) =
-                        thread_result.join().unwrap();
+                        result.join().unwrap();
                     tag ^= thread_tag;
                     cypher_text_buf
                         .write_all(&thread_write_buffer[..thread_offset])
@@ -217,38 +205,26 @@ impl EncryptorInstance {
                 }
             });
         }
-        tag ^= self.length as u128;
+        bar.finish_and_clear();
+
+        tag ^= length as u128;
 
         cypher_text_buf.write_all(bytes_of(&tag))?;
         cypher_text_buf.flush()?;
 
-        bar.finish_and_clear();
-
-        Ok(())
+        Ok((tag, cypher_text))
     }
-}
 
-impl DecryptorInstance {
-    pub fn new(
-        key: u128,
-        plain_text: PathBuf,
-        cypher_text: PathBuf,
-    ) -> Result<Self, Box<GcmError>> {
-        let key_schedule = aes::gen_encryption_key_schedule(key);
+    pub fn decrypt(&self, cypher_text: PathBuf) -> GcmResult<(u128, PathBuf)> {
         let length = (fs::metadata(&cypher_text)?.len() - 28) as usize;
 
-        Ok(Self {
-            key_schedule,
-            length,
-            plain_text,
-            cypher_text,
-        })
-    }
-    pub fn decrypt(self) -> Result<(), Box<GcmError>> {
-        let input_file = File::open(&self.cypher_text)?;
+        let input_file = fs::File::open(&cypher_text)?;
         let mut cypher_text_buf = BufReader::new(&input_file);
 
-        let mut tmp = self.plain_text.clone();
+        let mut plain_text = cypher_text;
+        plain_text.set_extension(""); // Removes extension
+
+        let mut tmp = plain_text.clone();
         tmp.set_file_name("tmp_dec");
 
         let output_file = fs::File::create(&tmp)?;
@@ -257,43 +233,37 @@ impl DecryptorInstance {
         let mut iv: [u8; 12] = [0; 12];
         let mut read_tag: [u8; 16] = [0; 16];
 
-        println!("decrypting...");
-
         cypher_text_buf.read_exact(&mut iv)?;
 
-        let tag_position = self.length as u64 + 12; // cyphertext + IV offset
-        cypher_text_buf.seek(std::io::SeekFrom::Start(tag_position))?;
+        let tag_position = length as u64 + 12; // cyphertext + IV offset
+        cypher_text_buf.seek(SeekFrom::Start(tag_position))?;
         cypher_text_buf.read_exact(&mut read_tag)?;
         let read_tag = u128::from_ne_bytes(read_tag);
 
         let cypher_position = 12;
-        cypher_text_buf.seek(std::io::SeekFrom::Start(cypher_position))?;
+        cypher_text_buf.seek(SeekFrom::Start(cypher_position))?;
 
         let mut tag = 0u128;
         let h = aes::encrypt_block(self.key_schedule, 0u128);
 
-        let mut read_buffer: [u8; MB] = [0; MB];
-
-        let bufread_cnt = (self.length + MB - 1) / MB;
-
         let mut ctr_arr = [0u8; 16]; // create a fixed-size array with 16 bytes
         ctr_arr[..12].copy_from_slice(&iv); // copy IV bytes into the array
-        ctr_arr[12..].copy_from_slice(bytes_of(&0u32)); // copy counter bytes into the array
 
         // add iv to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
 
-        let thread_num = available_parallelism().unwrap().get();
+        let thread_num = thread::available_parallelism().unwrap().get();
 
         let mut ctr: u32 = 1u32;
+        let mut read_buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+        let bufread_cnt = (length + BUFFER_SIZE - 1) / BUFFER_SIZE;
 
-        println!("");
         let bar = ProgressBar::new(bufread_cnt as u64);
         for buffer_index in 0..(bufread_cnt) {
             bar.inc(1);
 
             let buffer_size = if buffer_index == bufread_cnt - 1 {
-                let remaining = self.length - buffer_index * MB;
+                let remaining = length - buffer_index * BUFFER_SIZE;
                 let mut last_buffer = vec![0u8; remaining];
                 cypher_text_buf.read_exact(&mut last_buffer)?;
                 read_buffer[..remaining].copy_from_slice(&last_buffer);
@@ -301,14 +271,14 @@ impl DecryptorInstance {
             } else {
                 // This is a full buffer; read 1MB of data
                 cypher_text_buf.read_exact(&mut read_buffer)?;
-                MB
+                BUFFER_SIZE
             };
 
             let buf_blocks = (buffer_size + 15) / 16;
             let blocks_per_thread = buf_blocks / thread_num;
             let remainder_blocks = buf_blocks % thread_num;
 
-            scope(|scope| {
+            thread::scope(|scope| {
                 let mut thread_results = Vec::new();
 
                 for thread_id in 0..thread_num {
@@ -344,14 +314,25 @@ impl DecryptorInstance {
                                 let mut block = [0u8; 16];
                                 block[..block_size]
                                     .copy_from_slice(&thread_read_buffer[thread_offset..]);
-                                block[block_size..]
-                                    .copy_from_slice(&encrypted_counter.to_ne_bytes()[block_size..]);
+                                block[block_size..].copy_from_slice(
+                                    &encrypted_counter.to_ne_bytes()[block_size..],
+                                );
                                 thread_tag ^= gf_mult(h, *from_bytes(&block));
 
                                 encrypted_counter ^ from_bytes(&block)
                             } else {
-                                thread_tag ^= gf_mult(h, *from_bytes(&thread_read_buffer[thread_offset..thread_offset + block_size]));
-                                encrypted_counter ^ from_bytes(&thread_read_buffer[thread_offset..thread_offset + block_size])
+                                thread_tag ^= gf_mult(
+                                    h,
+                                    *from_bytes(
+                                        &thread_read_buffer
+                                            [thread_offset..thread_offset + block_size],
+                                    ),
+                                );
+                                encrypted_counter
+                                    ^ from_bytes(
+                                        &thread_read_buffer
+                                            [thread_offset..thread_offset + block_size],
+                                    )
                             };
 
                             thread_write_buffer[thread_offset..thread_offset + block_size]
@@ -367,9 +348,9 @@ impl DecryptorInstance {
                     thread_results.push(thread);
                 }
 
-                for thread_result in thread_results {
+                for result in thread_results {
                     let (thread_tag, thread_offset, thread_ctr, thread_write_buffer) =
-                        thread_result.join().unwrap();
+                        result.join().unwrap();
                     tag ^= thread_tag;
                     tmp_buf
                         .write_all(&thread_write_buffer[..thread_offset])
@@ -378,20 +359,18 @@ impl DecryptorInstance {
                 }
             });
         }
-        tag ^= self.length as u128;
+        bar.finish_and_clear();
 
+        tag ^= length as u128;
         if tag != read_tag {
             fs::remove_file(tmp)?;
-            bar.finish_and_clear();
-            return Err(Box::new(GcmError::TagMismatch));
+            return Err(GcmError::TagMismatch);
         }
 
         tmp_buf.flush()?;
-        fs::remove_file(&self.plain_text)?;
-        fs::rename(&tmp, &self.plain_text)?;
+        fs::remove_file(&plain_text)?;
+        fs::rename(&tmp, &plain_text)?;
 
-        bar.finish_and_clear();
-
-        Ok(())
+        Ok((tag, plain_text))
     }
 }
