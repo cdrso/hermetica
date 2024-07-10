@@ -7,8 +7,8 @@ use crate::aes;
 use std::thread;
 use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
-use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use bytemuck::{bytes_of, bytes_of_mut, from_bytes, cast_slice_mut};
 
 // https://software.intel.com/sites/default/files/managed/72/cc/clmul-wp-rev-2.02-2014-04-20.pdf
 
@@ -103,7 +103,8 @@ impl GcmInstance {
         let mut tag = 0u128;
         let h = aes::encrypt_block(self.key_schedule, 0u128);
 
-        let mut read_buffer = [0u8; BUFFER_SIZE];
+        let mut unaligned_read_buffer: [u128; BUFFER_SIZE / 16] = [0; BUFFER_SIZE / 16];
+        let read_buffer: &mut [u8] = cast_slice_mut(&mut unaligned_read_buffer);
         let bufread_cnt = (length + BUFFER_SIZE - 1) / BUFFER_SIZE;
 
         let mut ctr_arr = [0u8; 16]; // create a fixed-size array with 16 bytes
@@ -134,7 +135,7 @@ impl GcmInstance {
                 remaining
             } else {
                 // This is a full buffer; read 1MB of data
-                plain_text_buf.read_exact(&mut read_buffer)?;
+                plain_text_buf.read_exact(read_buffer)?;
                 BUFFER_SIZE
             };
 
@@ -263,7 +264,8 @@ impl GcmInstance {
         let thread_num = thread::available_parallelism()?.get();
 
         let mut ctr: u32 = 1u32;
-        let mut read_buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+        let mut unaligned_read_buffer: [u128; BUFFER_SIZE / 16] = [0; BUFFER_SIZE / 16];
+        let read_buffer: &mut [u8] = cast_slice_mut(&mut unaligned_read_buffer);
         let bufread_cnt = (length + BUFFER_SIZE - 1) / BUFFER_SIZE;
 
         let pb = ProgressBar::new(bufread_cnt as u64);
@@ -284,7 +286,7 @@ impl GcmInstance {
                 remaining
             } else {
                 // This is a full buffer; read 1MB of data
-                cypher_text_buf.read_exact(&mut read_buffer)?;
+                cypher_text_buf.read_exact(read_buffer)?;
                 BUFFER_SIZE
             };
 
