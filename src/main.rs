@@ -1,50 +1,49 @@
 mod aes;
 
-use aes::gcm::{GcmError, GcmInstance};
 use aes::Key;
-use clap::{Parser, ValueEnum};
-use rpassword::read_password;
 use std::env;
 use std::path::PathBuf;
+use rpassword::prompt_password;
+use aes::gcm::{GcmError, GcmInstance};
 
-/*
- * try to get rid of clap and rpassword, just std if possible
- * I don't really like this main file
- */
-
-#[derive(Parser)]
-struct CommandLineArgs {
-    #[arg(value_enum)]
-    op: Mode,
-    path: PathBuf,
-}
-
-#[derive(ValueEnum, Clone)]
 enum Mode {
-    #[value(alias = "-enc", alias = "--encrypt")]
-    Encrypt,
-    #[value(alias = "-dec", alias = "--decrypt")]
-    Decrypt,
+    Encryption,
+    Decryption,
 }
 
 fn main() {
-    env::set_var("RUST_BACKTRACE", "1");
-    let args = CommandLineArgs::parse();
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        eprintln!("Hermetica: hardware accelerated aes-gcm file encryption");
+        eprintln!("Copyright (C) 2024 Alejandro Cadarso\n");
+        eprintln!("Usage: hermetica -e <file> for encryption");
+        eprintln!("       hermetica -d <file> for decryption");
+        return;
+    }
 
-    println!("Insert Key:");
-    let key_text_1 = read_password().expect("Failed to read password");
-    println!("Confirm Key:");
-    let key_text_2 = read_password().expect("Failed to read password");
+    let mode = match args[1].as_str() {
+        "-e" => Mode::Encryption,
+        "-d" => Mode::Decryption,
+        _ => {
+            eprintln!("Invalid operation. Use -e for encryption or -d for decryption.");
+            return;
+        }
+    };
 
-    if key_text_1 != key_text_2 {
+    let file = PathBuf::from(&args[2]);
+
+    let key_str_1 = prompt_password("Insert Key: ").expect("Failed to read password");
+    let key_str_2 = prompt_password("Confirm Key: ").expect("Failed to read password");
+
+    if key_str_1 != key_str_2 {
         println!("Key inputs do not match, aborting");
         return;
     }
-    let key = Key::parse(key_text_1);
+    let key = Key::parse(key_str_1);
 
-    match args.op {
-        Mode::Encrypt => handle_encryption(key, args.path),
-        Mode::Decrypt => handle_decryption(key, args.path),
+    match mode {
+        Mode::Encryption => handle_encryption(key, file),
+        Mode::Decryption => handle_decryption(key, file),
     }
 }
 

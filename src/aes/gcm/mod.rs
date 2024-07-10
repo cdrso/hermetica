@@ -1,14 +1,14 @@
 pub mod clmul;
 
-use crate::aes;
-use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
-use indicatif::ProgressBar;
-use rand::Rng;
-use std::fmt;
 use std::fs;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::fmt;
+use rand::Rng;
+use crate::aes;
 use std::thread;
+use std::path::PathBuf;
+use indicatif::{ProgressBar, ProgressStyle};
+use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 
 // https://software.intel.com/sites/default/files/managed/72/cc/clmul-wp-rev-2.02-2014-04-20.pdf
 
@@ -112,13 +112,20 @@ impl GcmInstance {
         // add IV to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
 
-        let thread_num = thread::available_parallelism().unwrap().get();
+        let thread_num = thread::available_parallelism()?.get();
 
         let mut ctr: u32 = 1u32;
 
-        let bar = ProgressBar::new(bufread_cnt as u64);
+        let pb = ProgressBar::new(bufread_cnt as u64);
+        pb.set_message(format!("Encrypting -> {:?}", cypher_text));
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{msg} {spinner:.red} {elapsed_precise} {bar:.cyan/blue} ({pos}/{len}, ETA {eta})",
+            )
+            .unwrap(),
+        );
+
         for buffer_index in 0..(bufread_cnt) {
-            bar.inc(1);
             let buffer_size = if buffer_index == bufread_cnt - 1 {
                 let remaining = length - buffer_index * BUFFER_SIZE;
                 let mut last_read_buffer = vec![0u8; remaining];
@@ -204,14 +211,15 @@ impl GcmInstance {
                     ctr = ctr.max(thread_ctr);
                 }
             });
+            pb.inc(1);
         }
-        bar.finish_and_clear();
 
         tag ^= length as u128;
 
         cypher_text_buf.write_all(bytes_of(&tag))?;
         cypher_text_buf.flush()?;
 
+        pb.finish_with_message("Writing to disk");
         Ok((tag, cypher_text))
     }
 
@@ -252,16 +260,22 @@ impl GcmInstance {
         // add iv to tag
         tag ^= gf_mult(h, *(from_bytes(&ctr_arr)));
 
-        let thread_num = thread::available_parallelism().unwrap().get();
+        let thread_num = thread::available_parallelism()?.get();
 
         let mut ctr: u32 = 1u32;
         let mut read_buffer: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
         let bufread_cnt = (length + BUFFER_SIZE - 1) / BUFFER_SIZE;
 
-        let bar = ProgressBar::new(bufread_cnt as u64);
-        for buffer_index in 0..(bufread_cnt) {
-            bar.inc(1);
+        let pb = ProgressBar::new(bufread_cnt as u64);
+        pb.set_message(format!("Decrypting -> {:?}", plain_text));
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{msg} {spinner:.red} {elapsed_precise} {bar:.cyan/blue} ({pos}/{len}, ETA {eta})",
+            )
+            .unwrap(),
+        );
 
+        for buffer_index in 0..(bufread_cnt) {
             let buffer_size = if buffer_index == bufread_cnt - 1 {
                 let remaining = length - buffer_index * BUFFER_SIZE;
                 let mut last_buffer = vec![0u8; remaining];
@@ -358,8 +372,8 @@ impl GcmInstance {
                     ctr = ctr.max(thread_ctr);
                 }
             });
+            pb.inc(1);
         }
-        bar.finish_and_clear();
 
         tag ^= length as u128;
         if tag != read_tag {
@@ -371,6 +385,7 @@ impl GcmInstance {
         fs::remove_file(&plain_text)?;
         fs::rename(&tmp, &plain_text)?;
 
+        pb.finish_with_message("Writing to disk");
         Ok((tag, plain_text))
     }
 }
