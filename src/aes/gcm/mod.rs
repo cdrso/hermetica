@@ -27,15 +27,19 @@ pub struct GcmInstance {
 
 #[derive(Debug)]
 pub enum GcmError {
-    IoError(std::io::Error),
     TagMismatch,
+    IoError(std::io::Error),
+    BarError(indicatif::style::TemplateError),
+    ThreadJoinError(Box<dyn std::any::Any + Send>),
 }
 
 impl std::fmt::Display for GcmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            GcmError::IoError(ref err) => write!(f, "IO error: {}", err),
             GcmError::TagMismatch => write!(f, "Tag mismatch during decryption"),
+            GcmError::IoError(ref err) => write!(f, "IO error: {}", err),
+            GcmError::BarError(ref err) => write!(f, "Progress bar styling error: {}", err),
+            GcmError::ThreadJoinError(ref err) => write!(f, "Paralell processing error: {:?}", err)
         }
     }
 }
@@ -43,6 +47,18 @@ impl std::fmt::Display for GcmError {
 impl From<std::io::Error> for GcmError {
     fn from(err: std::io::Error) -> Self {
         GcmError::IoError(err)
+    }
+}
+
+impl From<indicatif::style::TemplateError> for GcmError {
+    fn from(err: indicatif::style::TemplateError) -> Self {
+        GcmError::BarError(err)
+    }
+}
+
+impl From<Box<dyn std::any::Any + Send>> for GcmError {
+    fn from(err: Box<dyn std::any::Any + Send>) -> Self {
+        GcmError::ThreadJoinError(err)
     }
 }
 
@@ -54,7 +70,7 @@ struct GcmDecrypt;
 trait GcmOperation: Sync {
     fn process_block(
         &self,
-        key_schedule: &[u32; 44],
+        key_schedule: [u32; 44],
         read_bytes: &[u8],
         counter: u128,
         tag: &mut u128,
@@ -77,13 +93,13 @@ pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
 impl GcmOperation for GcmEncrypt {
     fn process_block(
         &self,
-        key_schedule: &[u32; 44],
+        key_schedule: [u32; 44],
         read_bytes: &[u8],
         counter: u128,
         tag: &mut u128,
         h: u128,
     ) -> u128 {
-        let encrypted_counter = aes::encrypt_block(*key_schedule, counter);
+        let encrypted_counter = aes::encrypt_block(key_schedule, counter);
         let len = read_bytes.len();
         let mut block = [0u8; AES_BLOCK_SIZE];
         block[..len].copy_from_slice(&read_bytes[..len]);
@@ -97,13 +113,13 @@ impl GcmOperation for GcmEncrypt {
 impl GcmOperation for GcmDecrypt {
     fn process_block(
         &self,
-        key_schedule: &[u32; 44],
+        key_schedule: [u32; 44],
         read_bytes: &[u8],
         counter: u128,
         tag: &mut u128,
         h: u128,
     ) -> u128 {
-        let encrypted_counter = aes::encrypt_block(*key_schedule, counter);
+        let encrypted_counter = aes::encrypt_block(key_schedule, counter);
         let len = read_bytes.len();
         let mut block: [u8; AES_BLOCK_SIZE] = encrypted_counter.to_ne_bytes();
         block[..len].copy_from_slice(&read_bytes[..len]);
@@ -112,6 +128,12 @@ impl GcmOperation for GcmDecrypt {
 
         encrypted_counter ^ u128::from_ne_bytes(block)
     }
+}
+
+macro_rules! div_ceil {
+    ($a:expr, $b:expr) => {
+        ($a + $b - 1) / $b
+    };
 }
 
 impl GcmInstance {
@@ -179,14 +201,13 @@ impl GcmInstance {
         };
 
         let mut buffer = [0u8; BUFFER_SIZE];
-        let bufread_cnt = (length + BUFFER_SIZE - 1) / BUFFER_SIZE;
+        let bufread_cnt = div_ceil!(length, BUFFER_SIZE);
 
         let pb = ProgressBar::new(bufread_cnt as u64);
         pb.set_style(
             ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] ({eta})",
-            )
-            .unwrap(),
+            )?
         );
 
         let thread_num = thread::available_parallelism()?.get();
@@ -200,15 +221,15 @@ impl GcmInstance {
 
             input.read_exact(&mut buffer[..bytes_read])?;
             //dbg!(input.stream_position()?);
-            let blocks_count = (bytes_read + (AES_BLOCK_SIZE - 1)) / AES_BLOCK_SIZE;
-            let blocks_per_thread = (blocks_count + thread_num - 1) / thread_num;
+            let blocks_count = div_ceil!(bytes_read, AES_BLOCK_SIZE);
+            let blocks_per_thread = div_ceil!(blocks_count, thread_num);
 
             thread::scope(|s| {
                 let mut thread_results = Vec::new();
                 for thread_id in 0..thread_num {
                     let start = thread_id * (blocks_per_thread * AES_BLOCK_SIZE);
                     let end = (start + (blocks_per_thread * AES_BLOCK_SIZE)).min(bytes_read);
-                    let thread_blocks = (end - start + (AES_BLOCK_SIZE - 1)) / AES_BLOCK_SIZE;
+                    let thread_blocks = div_ceil!(end - start, AES_BLOCK_SIZE);
 
                     let thread_read_buffer = &buffer[start..end];
                     let mut thread_write_buffer = vec![0u8; end - start];
@@ -230,7 +251,7 @@ impl GcmInstance {
                             match mode {
                                 GcmMode::Encryption => {
                                     let processed_block = op.process_block(
-                                        &self.key_schedule,
+                                        self.key_schedule,
                                         read_bytes,
                                         u128::from_ne_bytes(thread_ctr_arr),
                                         &mut thread_tag,
@@ -241,7 +262,7 @@ impl GcmInstance {
                                 }
                                 GcmMode::Decryption => {
                                     let processed_block = op.process_block(
-                                        &self.key_schedule,
+                                        self.key_schedule,
                                         read_bytes,
                                         u128::from_ne_bytes(thread_ctr_arr),
                                         &mut thread_tag,
@@ -261,7 +282,7 @@ impl GcmInstance {
                 }
                 for handle in thread_results {
                     let (thread_tag, thread_ctr, thread_write_buffer, thread_offset) =
-                        handle.join().unwrap();
+                        handle.join()?;
                     tag ^= thread_tag;
                     output.write_all(&thread_write_buffer[..thread_offset])?;
                     ctr = ctr.max(thread_ctr);
