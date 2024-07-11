@@ -76,6 +76,8 @@ trait GcmOperation: Sync {
         tag: &mut u128,
         h: u128,
     ) -> u128;
+
+    fn mode() -> GcmMode;
 }
 
 pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
@@ -108,6 +110,10 @@ impl GcmOperation for GcmEncrypt {
 
         cypher_block
     }
+
+    fn mode() -> GcmMode {
+        GcmMode::Encryption
+    }
 }
 
 impl GcmOperation for GcmDecrypt {
@@ -125,8 +131,11 @@ impl GcmOperation for GcmDecrypt {
         block[..len].copy_from_slice(&read_bytes[..len]);
         *tag ^= gf_mult(h, u128::from_ne_bytes(block));
 
-
         encrypted_counter ^ u128::from_ne_bytes(block)
+    }
+
+    fn mode() -> GcmMode {
+        GcmMode::Decryption
     }
 }
 
@@ -168,7 +177,11 @@ impl GcmInstance {
         };
 
         let output_file = match mode {
-            GcmMode::Encryption => fs::File::create(&output_path)?,
+            GcmMode::Encryption => {
+                let mut tmp_path = output_path.clone();
+                tmp_path.set_file_name("tmp_enc");
+                fs::File::create(tmp_path)?
+            },
             GcmMode::Decryption => {
                 let mut tmp_path = output_path.clone();
                 tmp_path.set_file_name("tmp_dec");
@@ -186,7 +199,6 @@ impl GcmInstance {
         output: &mut BufWriter<File>,
         iv: &[u8; 12],
         op: &T,
-        mode: &GcmMode,
     ) -> GcmResult<u128> {
         let h = aes::encrypt_block(self.key_schedule, 0u128);
         let mut ctr_arr = [0u8; AES_BLOCK_SIZE];
@@ -194,7 +206,7 @@ impl GcmInstance {
         let mut tag = gf_mult(h, *from_bytes(&ctr_arr));
 
         //gives different lengths
-        let length = match mode {
+        let length = match T::mode() {
             GcmMode::Encryption => input.get_ref().metadata()?.len() as usize,
             // 28 = tag bytes + iv bytes = 16 + 12
             GcmMode::Decryption => (input.get_ref().metadata()?.len() - 28) as usize,
@@ -206,7 +218,7 @@ impl GcmInstance {
         let pb = ProgressBar::new(bufread_cnt as u64);
         pb.set_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] ({eta})",
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] (ETA: {eta})",
             )?
         );
 
@@ -220,7 +232,6 @@ impl GcmInstance {
             }
 
             input.read_exact(&mut buffer[..bytes_read])?;
-            //dbg!(input.stream_position()?);
             let blocks_count = div_ceil!(bytes_read, AES_BLOCK_SIZE);
             let blocks_per_thread = div_ceil!(blocks_count, thread_num);
 
@@ -239,7 +250,6 @@ impl GcmInstance {
                     let mut thread_ctr: u32 = ctr + (start / AES_BLOCK_SIZE) as u32;
 
                     let handle = s.spawn(move || {
-                        //no tiene en cuenta el remainder
                         for _ in 0..thread_blocks {
                             thread_ctr_arr[12..].copy_from_slice(bytes_of(&thread_ctr));
 
@@ -248,7 +258,7 @@ impl GcmInstance {
                             let read_bytes =
                                 &thread_read_buffer[thread_offset..thread_offset + block_size];
 
-                            match mode {
+                            match T::mode() {
                                 GcmMode::Encryption => {
                                     let processed_block = op.process_block(
                                         self.key_schedule,
@@ -308,6 +318,7 @@ impl GcmInstance {
         match mode {
             GcmMode::Encryption => {
                 output.write_all(&tag.to_be_bytes())?;
+                fs::rename(PathBuf::from("tmp_enc"), output_path)?;
             }
             GcmMode::Decryption => {
                 let mut read_tag = [0u8; 16];
@@ -334,7 +345,6 @@ impl GcmInstance {
             &mut writer,
             &iv,
             &GcmEncrypt,
-            &GcmMode::Encryption,
         )?;
         self.finalize(
             &mut reader,
@@ -354,7 +364,6 @@ impl GcmInstance {
             &mut writer,
             &iv,
             &GcmDecrypt,
-            &GcmMode::Decryption,
         )?;
         self.finalize(
             &mut reader,
