@@ -1,10 +1,10 @@
 mod aes;
 
+use aes::gcm::{GcmError, GcmInstance, GcmMode};
 use aes::Key;
+use rpassword::prompt_password;
 use std::env;
 use std::path::PathBuf;
-use rpassword::prompt_password;
-use aes::gcm::{GcmError, GcmInstance, GcmMode};
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
@@ -39,12 +39,17 @@ fn main() {
     let key_val = key.extract();
     let gcm = GcmInstance::new(key_val);
 
-    match gcm.process(file, mode) {
+    let runner = match mode {
+        GcmMode::Encryption => gcm.encrypt(file),
+        GcmMode::Decryption => gcm.decrypt(file),
+    };
+
+    match runner {
         Ok((tag, output_path)) => {
             println!("Operation completed successfully.");
             println!("Output file: {:?}", output_path);
             println!("Tag: {:032x}", tag);
-        },
+        }
         Err(err) => handle_gcm_error(err),
     }
 }
