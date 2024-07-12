@@ -4,11 +4,8 @@ use crate::aes;
 use std::fs;
 use std::cmp;
 use std::fmt;
-use std::os::fd::AsFd;
 use std::thread;
-use filepath::FilePath;
 use rand::Rng;
-use tempfile::tempfile_in;
 use std::fs::File;
 use std::path::PathBuf;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -184,7 +181,6 @@ impl GcmInstance {
 
         let output_file = NamedTempFile::new_in("./")?;
         let output = BufWriter::new(output_file);
-        dbg!("a");
 
         Ok((input, output, iv, output_path))
     }
