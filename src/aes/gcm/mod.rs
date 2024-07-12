@@ -39,7 +39,6 @@ impl Drop for GcmInstance {
 pub enum GcmError {
     TagMismatch,
     IoError(std::io::Error),
-    BarError(indicatif::style::TemplateError),
     ThreadJoinError(Box<dyn std::any::Any + Send>),
 }
 
@@ -48,7 +47,6 @@ impl std::fmt::Display for GcmError {
         match *self {
             GcmError::TagMismatch => write!(f, "Tag mismatch during decryption"),
             GcmError::IoError(ref err) => write!(f, "IO error: {}", err),
-            GcmError::BarError(ref err) => write!(f, "Progress bar styling error: {}", err),
             GcmError::ThreadJoinError(ref err) => write!(f, "Paralell processing error: {:?}", err)
         }
     }
@@ -57,12 +55,6 @@ impl std::fmt::Display for GcmError {
 impl From<std::io::Error> for GcmError {
     fn from(err: std::io::Error) -> Self {
         GcmError::IoError(err)
-    }
-}
-
-impl From<indicatif::style::TemplateError> for GcmError {
-    fn from(err: indicatif::style::TemplateError) -> Self {
-        GcmError::BarError(err)
     }
 }
 
@@ -168,7 +160,7 @@ impl GcmInstance {
         &self,
         input_path: &PathBuf,
         mode: &GcmMode,
-    ) -> GcmResult<(BufReader<File>, BufWriter<NamedTempFile>, [u8; 12], PathBuf, PathBuf)> {
+    ) -> GcmResult<(BufReader<File>, BufWriter<NamedTempFile>, [u8; 12], PathBuf)> {
         let input_file = fs::File::open(input_path)?;
         let mut input = BufReader::new(input_file);
 
@@ -188,11 +180,9 @@ impl GcmInstance {
         };
 
         let output_file = NamedTempFile::new()?;
-        let tmp_path = output_file.path().to_path_buf();
-
         let output = BufWriter::new(output_file);
 
-        Ok((input, output, iv, output_path, tmp_path))
+        Ok((input, output, iv, output_path))
     }
 
     fn compute<T: GcmOperation + ?Sized>(
@@ -220,7 +210,7 @@ impl GcmInstance {
         pb.set_style(
             ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] (ETA: {eta})",
-            )?
+            ).expect("Hardcoded template should always be correct")
         );
 
         let available_threads = thread::available_parallelism()?.get();
@@ -296,12 +286,11 @@ impl GcmInstance {
 
     fn finalize(
         &self,
-        input: &mut BufReader<File>,
-        output: &mut BufWriter<NamedTempFile>,
+        mut input: BufReader<File>,
+        mut output: BufWriter<NamedTempFile>,
         tag: u128,
         mode: &GcmMode,
         output_path: &PathBuf,
-        tmp_path: &PathBuf,
     ) -> GcmResult<()> {
         match mode {
             GcmMode::Encryption => {
@@ -317,13 +306,16 @@ impl GcmInstance {
                 }
             }
         }
-        fs::rename(tmp_path, output_path)?;
+        let tmp = output.into_inner().expect("BufWriter must contain a valid writer");
+        fs::copy(&tmp, output_path)?;
+        fs::remove_file(&tmp)?;
+
         Ok(())
     }
 
     /// Encrypt a given file.
     pub fn encrypt(&self, plain_text: PathBuf) -> GcmResult<(u128, PathBuf)> {
-        let (mut reader, mut writer, iv, encrypted_file_path, tmp_path) =
+        let (mut reader, mut writer, iv, encrypted_file_path) =
             self.init(&plain_text, &GcmMode::Encryption)?;
         writer.write_all(&iv)?;
         let tag = self.compute(
@@ -333,19 +325,18 @@ impl GcmInstance {
             &GcmEncrypt,
         )?;
         self.finalize(
-            &mut reader,
-            &mut writer,
+            reader,
+            writer,
             tag,
             &GcmMode::Encryption,
             &encrypted_file_path,
-            &tmp_path
         )?;
         Ok((tag, encrypted_file_path))
     }
 
     /// Decrypt a given file.
     pub fn decrypt(&self, cypher_text: PathBuf) -> GcmResult<(u128, PathBuf)> {
-        let (mut reader, mut writer, iv, decrypted_file_path, tmp_path) =
+        let (mut reader, mut writer, iv, decrypted_file_path) =
             self.init(&cypher_text, &GcmMode::Decryption)?;
         let tag = self.compute(
             &mut reader,
@@ -354,12 +345,11 @@ impl GcmInstance {
             &GcmDecrypt,
         )?;
         self.finalize(
-            &mut reader,
-            &mut writer,
+            reader,
+            writer,
             tag,
             &GcmMode::Decryption,
             &decrypted_file_path,
-            &tmp_path
         )?;
         Ok((tag, decrypted_file_path))
     }

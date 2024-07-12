@@ -79,9 +79,6 @@ fn handle_gcm_error(err: GcmError) {
         GcmError::IoError(io_err) => {
             eprintln!("IO error: {}", io_err);
         }
-        GcmError::BarError(bar_err) => {
-            eprintln!("Indicatif styling error: {}", bar_err);
-        }
         GcmError::ThreadJoinError(thread_err) => {
             eprintln!("Parallel processing error: {:?}", thread_err);
         }
