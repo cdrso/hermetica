@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use indicatif::{ProgressBar, ProgressStyle};
-use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
+use bytemuck::{bytes_of, bytes_of_mut};
 use tempfile::NamedTempFile;
 use zeroize::Zeroize;
 
@@ -195,7 +195,7 @@ impl GcmInstance {
         let h = aes::encrypt_block(self.key_schedule, 0u128);
         let mut ctr_arr = [0u8; AES_BLOCK_SIZE];
         ctr_arr[..12].copy_from_slice(iv);
-        let mut tag = gf_mult(h, *from_bytes(&ctr_arr));
+        let mut tag = gf_mult(h, u128::from_ne_bytes(ctr_arr));
 
         let length = match T::mode() {
             GcmMode::Encryption => input.get_ref().metadata()?.len() as usize,
