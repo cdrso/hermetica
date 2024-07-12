@@ -6,7 +6,7 @@ Hardware-Accelerated File Encryption and Decryption
 
 Hermetica is a high-performance Rust application for rapid file encryption and decryption. It leverages hardware acceleration and efficient multithreading to maximize performance across all available CPU cores.
 
-> **Important Security Disclaimer:** Hermetica implements a custom, from-scratch AES-GCM implementation. It has not undergone formal security audits and is not recommended for production or security-critical applications without thorough review and testing.
+> **Important Security Disclaimer:** Hermetica uses a custom, from-scratch AES-GCM implementation. It has not undergone formal security audits and is not recommended for production or security-critical applications without thorough review and testing.
 
 ## Key Features
 
@@ -20,17 +20,17 @@ Hermetica is a high-performance Rust application for rapid file encryption and d
 - **Hardware Requirements:** x86 processor with `AES-NI` and `PCLMULQDQ` support
 - **Tools used:**
   - Rust for application logic and safe concurrency
-  - NASM Assembly for performance-critical cryptographic operations
-- **Concurrency Model:** Rust's scoped threads for low-overhead parallel processing
+  - x86 Assembly for performance-critical cryptographic operations
+- **Concurrency Model:** Rust's `std::thread` for low-overhead parallel processing
 
 ## Performance
 
 Hermetica is engineered for speed and efficiency:
 
 - Fully utilizes all available CPU threads for parallel processing
-- Dedicated instruction sets significantly outperform bare software implementation
+- Dedicated instruction sets significantly outperform plain software implementation
 - Performance is orders of magnitude faster than Rayon-based parallelism
-  - Rayon's overhead did not yield performance improvements on this specific use case
+  - For this specific use case rayon did not yield performance improvements
 - Speed limited by disk I/O operations
   - Cryptographic operations are highly optimized and intensive computation is not the limiting factor
 
@@ -42,8 +42,8 @@ Hermetica is engineered for speed and efficiency:
 
 Hermetica provides simple command-line operations for file encryption and decryption:
 
-- **Encryption:** `hermetica -e <input_file> `
-- **Decryption:** `hermetica -d <input_file>`
+- **Encryption:** `hermetica -e <file> `
+- **Decryption:** `hermetica -d <file>`
 
 ## Limitations and Considerations
 
