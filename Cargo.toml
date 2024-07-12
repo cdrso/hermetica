@@ -7,7 +7,7 @@ license-file = "LICENSE.txt"
 description = "Hardware accelerated file encryption/decryption"
 readme = "README.md"
 repository = "https://github.com/cdrso/hermetica"
-keywords = ["cli", "file encryption"]
+keywords = ["cli", "encryption", "decryption", "paralell", "accelerated"]
 categories = ["command-line-utilities"]
 edition = "2021"
 
