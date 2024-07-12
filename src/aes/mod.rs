@@ -1,39 +1,39 @@
 pub mod aes_ni;
 pub mod gcm;
+
+use sha256;
+use zeroize::Zeroize;
 use bytemuck::{bytes_of, bytes_of_mut};
 
+/// Newtype for aes key.
 pub struct Key {
     value: u128,
 }
 
 impl Key {
-    pub fn parse(key_text: String) -> Self {
-        let mut key_bytes = key_text.as_bytes();
-        let mut key_len = key_bytes.len();
+    /// Generates Key struct from text input.
+    pub fn parse(key_text: &str) -> Self {
+        let hash = sha256::digest(key_text);
 
-        //todo
-        if key_len == 0 {
-            println!("Fuck you");
-        }
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&hash.as_bytes()[..16]);
 
-        if key_len > 16 {
-            key_len = 16;
-            key_bytes = &key_bytes[0..16]
-        }
-
-        let mut key_bytes_array = [0u8; 16];
-        key_bytes_array[..key_len].copy_from_slice(key_bytes);
-
-        Self {
-            value: u128::from_ne_bytes(key_bytes_array),
-        }
+        Self { value: u128::from_ne_bytes(key) }
     }
 
+    /// Getter for numeric key value.
     pub fn extract(&self) -> u128 {
         self.value
     }
 }
 
+impl Drop for Key {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
+}
+
+/// Generates aes key schedule.
 pub(crate) fn gen_encryption_key_schedule(key: u128) -> [u32; 44] {
     let mut encryption_key_schedule: [u32; 44] = [0; 44];
     unsafe {
@@ -47,6 +47,7 @@ pub(crate) fn gen_encryption_key_schedule(key: u128) -> [u32; 44] {
 }
 
 #[allow(dead_code)]
+/// Generates aes decrypting key schedule.
 pub(crate) fn gen_decryption_key_schedule(encryption_key_schedule: [u32; 44]) -> [u32; 44] {
     let mut decryption_key_schedule: [u32; 44] = [0; 44];
     unsafe {
@@ -59,6 +60,7 @@ pub(crate) fn gen_decryption_key_schedule(encryption_key_schedule: [u32; 44]) ->
     decryption_key_schedule
 }
 
+/// Performs aes block encryption.
 pub(crate) fn encrypt_block(encryption_key_schedule: [u32; 44], plain_text: u128) -> u128 {
     let mut cypher_text: u128 = 0;
     unsafe {
@@ -73,6 +75,7 @@ pub(crate) fn encrypt_block(encryption_key_schedule: [u32; 44], plain_text: u128
 }
 
 #[allow(dead_code)]
+/// Performs aes block decryption.
 pub(crate) fn decrypt_block(decryption_key_schedule: [u32; 44], cypher_text: u128) -> u128 {
     let mut plain_text: u128 = 0;
     unsafe {
@@ -84,4 +87,30 @@ pub(crate) fn decrypt_block(decryption_key_schedule: [u32; 44], cypher_text: u12
     }
 
     plain_text
+}
+
+#[cfg(test)]
+
+mod tests {
+    use super::*;
+    use rand::Rng;
+
+
+    #[test]
+    fn encrypt_decrypt_block() {
+        let key_text = "test_key";
+        let key = Key::parse(key_text);
+        let key_val = key.extract();
+
+        let enc_key_schedule = gen_encryption_key_schedule(key_val);
+        let dec_key_schedule = gen_decryption_key_schedule(enc_key_schedule);
+
+        let mut rng = rand::thread_rng();
+        let block: u128 = rng.gen();
+
+        let encrypted_block = encrypt_block(enc_key_schedule, block);
+        let decrypted_block = decrypt_block(dec_key_schedule, encrypted_block);
+
+        assert_eq!(block, decrypted_block)
+    }
 }

@@ -20,7 +20,11 @@ fn main() {
         "
         Compiling NASM files:
         Ensure it is installed and in your path
-        https://www.nasm.us/",
+        https://www.nasm.us/
+
+        If error persists you may be on a not
+        aes-ni capable platform
+        ",
     ) {
         linker.object(o);
     }

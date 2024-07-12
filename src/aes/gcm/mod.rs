@@ -1,30 +1,40 @@
 pub mod clmul;
 
 use crate::aes;
-use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
-use indicatif::{ProgressBar, ProgressStyle};
-use rand::Rng;
+use std::fs;
 use std::cmp;
 use std::fmt;
-use std::fs;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
 use std::thread;
+use rand::Rng;
+use std::fs::File;
+use std::path::PathBuf;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use indicatif::{ProgressBar, ProgressStyle};
+use bytemuck::{bytes_of, bytes_of_mut, from_bytes};
+use tempfile::NamedTempFile;
+use zeroize::Zeroize;
 
 const BUFFER_SIZE: usize = 1 << 20;
 const AES_BLOCK_SIZE: usize = 16;
 
-#[derive(PartialEq)]
+/// Possible Gcm modes of operation.
 pub enum GcmMode {
     Encryption,
     Decryption,
 }
 
+/// Gcm data structure.
 pub struct GcmInstance {
     key_schedule: [u32; 44],
 }
 
+impl Drop for GcmInstance {
+    fn drop(&mut self) {
+        self.key_schedule.zeroize();
+    }
+}
+
+/// Possible Gcm operation errors.
 #[derive(Debug)]
 pub enum GcmError {
     TagMismatch,
@@ -62,6 +72,7 @@ impl From<Box<dyn std::any::Any + Send>> for GcmError {
     }
 }
 
+/// Wrapper Result type.
 pub type GcmResult<T> = Result<T, GcmError>;
 
 struct GcmEncrypt;
@@ -80,6 +91,7 @@ trait GcmOperation: Sync {
     fn mode() -> GcmMode;
 }
 
+/// Performs Galois field multiplication of two operands.
 pub(crate) fn gf_mult(operand_a: u128, operand_b: u128) -> u128 {
     let mut product: u128 = 0;
     unsafe {
@@ -146,8 +158,9 @@ macro_rules! div_ceil {
 }
 
 impl GcmInstance {
-    pub fn new(key: u128) -> Self {
-        let key_schedule = aes::gen_encryption_key_schedule(key);
+    /// Construct a new instance from a Key.
+    pub fn new(key: aes::Key) -> Self {
+        let key_schedule = aes::gen_encryption_key_schedule(key.extract());
         Self { key_schedule }
     }
 
@@ -155,20 +168,18 @@ impl GcmInstance {
         &self,
         input_path: &PathBuf,
         mode: &GcmMode,
-    ) -> GcmResult<(BufReader<File>, BufWriter<File>, [u8; 12], PathBuf)> {
+    ) -> GcmResult<(BufReader<File>, BufWriter<NamedTempFile>, [u8; 12], PathBuf, PathBuf)> {
         let input_file = fs::File::open(input_path)?;
         let mut input = BufReader::new(input_file);
 
+        let mut output_path = input_path.clone();
         let (output_path, iv) = match mode {
             GcmMode::Encryption => {
-                let mut output_path = input_path.clone();
                 output_path.as_mut_os_string().push(".hmtc");
-                //TODO
                 let iv: [u8; 12] = rand::thread_rng().gen();
                 (output_path, iv)
             }
             GcmMode::Decryption => {
-                let mut output_path = input_path.clone();
                 output_path.set_extension("");
                 let mut iv = [0u8; 12];
                 input.read_exact(&mut iv)?;
@@ -176,27 +187,18 @@ impl GcmInstance {
             }
         };
 
-        let output_file = match mode {
-            GcmMode::Encryption => {
-                let mut tmp_path = output_path.clone();
-                tmp_path.set_file_name("tmp_enc");
-                fs::File::create(tmp_path)?
-            },
-            GcmMode::Decryption => {
-                let mut tmp_path = output_path.clone();
-                tmp_path.set_file_name("tmp_dec");
-                fs::File::create(tmp_path)?
-            }
-        };
+        let output_file = NamedTempFile::new()?;
+        let tmp_path = output_file.path().to_path_buf();
+
         let output = BufWriter::new(output_file);
 
-        Ok((input, output, iv, output_path))
+        Ok((input, output, iv, output_path, tmp_path))
     }
 
     fn compute<T: GcmOperation + ?Sized>(
         &self,
         input: &mut BufReader<File>,
-        output: &mut BufWriter<File>,
+        output: &mut BufWriter<NamedTempFile>,
         iv: &[u8; 12],
         op: &T,
     ) -> GcmResult<u128> {
@@ -205,7 +207,6 @@ impl GcmInstance {
         ctr_arr[..12].copy_from_slice(iv);
         let mut tag = gf_mult(h, *from_bytes(&ctr_arr));
 
-        //gives different lengths
         let length = match T::mode() {
             GcmMode::Encryption => input.get_ref().metadata()?.len() as usize,
             // 28 = tag bytes + iv bytes = 16 + 12
@@ -222,7 +223,7 @@ impl GcmInstance {
             )?
         );
 
-        let thread_num = thread::available_parallelism()?.get();
+        let available_threads = thread::available_parallelism()?.get();
         let mut ctr: u32 = 1;
 
         for buffer_index in 0..bufread_cnt {
@@ -233,6 +234,7 @@ impl GcmInstance {
 
             input.read_exact(&mut buffer[..bytes_read])?;
             let blocks_count = div_ceil!(bytes_read, AES_BLOCK_SIZE);
+            let thread_num = available_threads.min(blocks_count);
             let blocks_per_thread = div_ceil!(blocks_count, thread_num);
 
             thread::scope(|s| {
@@ -240,8 +242,8 @@ impl GcmInstance {
                 for thread_id in 0..thread_num {
                     let start = thread_id * (blocks_per_thread * AES_BLOCK_SIZE);
                     let end = (start + (blocks_per_thread * AES_BLOCK_SIZE)).min(bytes_read);
-                    let thread_blocks = div_ceil!(end - start, AES_BLOCK_SIZE);
 
+                    let thread_blocks = div_ceil!(end - start, AES_BLOCK_SIZE);
                     let thread_read_buffer = &buffer[start..end];
                     let mut thread_write_buffer = vec![0u8; end - start];
                     let mut thread_tag: u128 = 0u128;
@@ -258,30 +260,15 @@ impl GcmInstance {
                             let read_bytes =
                                 &thread_read_buffer[thread_offset..thread_offset + block_size];
 
-                            match T::mode() {
-                                GcmMode::Encryption => {
-                                    let processed_block = op.process_block(
-                                        self.key_schedule,
-                                        read_bytes,
-                                        u128::from_ne_bytes(thread_ctr_arr),
-                                        &mut thread_tag,
-                                        h,
-                                    );
-                                    thread_write_buffer[thread_offset..thread_offset + block_size]
-                                        .copy_from_slice(&bytes_of(&processed_block)[..block_size]);
-                                }
-                                GcmMode::Decryption => {
-                                    let processed_block = op.process_block(
-                                        self.key_schedule,
-                                        read_bytes,
-                                        u128::from_ne_bytes(thread_ctr_arr),
-                                        &mut thread_tag,
-                                        h,
-                                    );
-                                    thread_write_buffer[thread_offset..thread_offset + block_size]
-                                        .copy_from_slice(&bytes_of(&processed_block)[..block_size]);
-                                }
-                            }
+                            let processed_block = op.process_block(
+                                self.key_schedule,
+                                read_bytes,
+                                u128::from_ne_bytes(thread_ctr_arr),
+                                &mut thread_tag,
+                                h,
+                            );
+                            thread_write_buffer[thread_offset..thread_offset + block_size]
+                                .copy_from_slice(&bytes_of(&processed_block)[..block_size]);
 
                             thread_ctr += 1;
                             thread_offset += block_size;
@@ -310,15 +297,15 @@ impl GcmInstance {
     fn finalize(
         &self,
         input: &mut BufReader<File>,
-        output: &mut BufWriter<File>,
+        output: &mut BufWriter<NamedTempFile>,
         tag: u128,
         mode: &GcmMode,
         output_path: &PathBuf,
+        tmp_path: &PathBuf,
     ) -> GcmResult<()> {
         match mode {
             GcmMode::Encryption => {
                 output.write_all(&tag.to_be_bytes())?;
-                fs::rename(PathBuf::from("tmp_enc"), output_path)?;
             }
             GcmMode::Decryption => {
                 let mut read_tag = [0u8; 16];
@@ -326,18 +313,17 @@ impl GcmInstance {
                 input.seek(SeekFrom::End(-16))?;
                 input.read_exact(&mut read_tag)?;
                 if tag != u128::from_be_bytes(read_tag) {
-                    fs::remove_file(PathBuf::from("tmp_dec"))?;
                     return Err(GcmError::TagMismatch);
                 }
-                fs::rename(PathBuf::from("tmp_dec"), output_path)?;
             }
         }
-        output.flush()?;
+        fs::rename(tmp_path, output_path)?;
         Ok(())
     }
 
+    /// Encrypt a given file.
     pub fn encrypt(&self, plain_text: PathBuf) -> GcmResult<(u128, PathBuf)> {
-        let (mut reader, mut writer, iv, encrypted_file_path) =
+        let (mut reader, mut writer, iv, encrypted_file_path, tmp_path) =
             self.init(&plain_text, &GcmMode::Encryption)?;
         writer.write_all(&iv)?;
         let tag = self.compute(
@@ -352,12 +338,14 @@ impl GcmInstance {
             tag,
             &GcmMode::Encryption,
             &encrypted_file_path,
+            &tmp_path
         )?;
         Ok((tag, encrypted_file_path))
     }
 
+    /// Decrypt a given file.
     pub fn decrypt(&self, cypher_text: PathBuf) -> GcmResult<(u128, PathBuf)> {
-        let (mut reader, mut writer, iv, decrypted_file_path) =
+        let (mut reader, mut writer, iv, decrypted_file_path, tmp_path) =
             self.init(&cypher_text, &GcmMode::Decryption)?;
         let tag = self.compute(
             &mut reader,
@@ -371,7 +359,56 @@ impl GcmInstance {
             tag,
             &GcmMode::Decryption,
             &decrypted_file_path,
+            &tmp_path
         )?;
         Ok((tag, decrypted_file_path))
+    }
+}
+
+#[cfg(test)]
+
+mod tests {
+    use super::*;
+
+    #[test]
+    fn big_file() {
+        let key_text = "test_key";
+        let key = aes::Key::parse(key_text);
+
+        let gcm = GcmInstance::new(key);
+        let plain_file_path = PathBuf::from("./test_files/war_and_peace.txt");
+
+        let (tag_1, encrypted_file_path) = gcm.encrypt(plain_file_path).unwrap();
+        let (tag_2, _) = gcm.decrypt(encrypted_file_path).unwrap();
+
+        assert_eq!(tag_1, tag_2)
+    }
+
+    #[test]
+    fn block_file() {
+        let key_text = "test_key";
+        let key = aes::Key::parse(key_text);
+
+        let gcm = GcmInstance::new(key);
+        let plain_file_path = PathBuf::from("./test_files/16bytes");
+
+        let (tag_1, encrypted_file_path) = gcm.encrypt(plain_file_path).unwrap();
+        let (tag_2, _) = gcm.decrypt(encrypted_file_path).unwrap();
+
+        assert_eq!(tag_1, tag_2)
+    }
+
+    #[test]
+    fn truncated_block_file() {
+        let key_text = "test_key";
+        let key = aes::Key::parse(key_text);
+
+        let gcm = GcmInstance::new(key);
+        let plain_file_path = PathBuf::from("./test_files/15bytes");
+
+        let (tag_1, encrypted_file_path) = gcm.encrypt(plain_file_path).unwrap();
+        let (tag_2, _) = gcm.decrypt(encrypted_file_path).unwrap();
+
+        assert_eq!(tag_1, tag_2)
     }
 }
