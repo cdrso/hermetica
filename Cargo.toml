@@ -2,7 +2,7 @@
 name = "hermetica"
 version = "0.1.0"
 authors = ["Alejandro Cadarso <acadarsotp@gmail.com>"]
-license = "GPLv3"
+license = "GPL-3.0-only"
 license-file = "LICENSE.txt"
 description = "Hardware accelerated file encryption/decryption"
 readme = "README.md"
