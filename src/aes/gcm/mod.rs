@@ -4,8 +4,11 @@ use crate::aes;
 use std::fs;
 use std::cmp;
 use std::fmt;
+use std::os::fd::AsFd;
 use std::thread;
+use filepath::FilePath;
 use rand::Rng;
+use tempfile::tempfile_in;
 use std::fs::File;
 use std::path::PathBuf;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -179,8 +182,9 @@ impl GcmInstance {
             }
         };
 
-        let output_file = NamedTempFile::new()?;
+        let output_file = NamedTempFile::new_in("./")?;
         let output = BufWriter::new(output_file);
+        dbg!("a");
 
         Ok((input, output, iv, output_path))
     }
@@ -295,6 +299,7 @@ impl GcmInstance {
         match mode {
             GcmMode::Encryption => {
                 output.write_all(&tag.to_be_bytes())?;
+                output.flush()?;
             }
             GcmMode::Decryption => {
                 let mut read_tag = [0u8; 16];
@@ -306,10 +311,8 @@ impl GcmInstance {
                 }
             }
         }
-        let tmp = output.into_inner().expect("BufWriter must contain a valid writer");
-        fs::copy(&tmp, output_path)?;
-        fs::remove_file(&tmp)?;
-
+        let tmp = output.get_ref();
+        fs::rename(tmp.path(), output_path)?;
         Ok(())
     }
 
